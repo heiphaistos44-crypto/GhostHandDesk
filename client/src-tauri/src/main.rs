@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{Manager, State, Window};
+use tauri::{Manager, State};
 use tokio::sync::Mutex;
 
 // Import des modules du client
@@ -188,6 +188,9 @@ fn main() {
         config: Arc::new(Mutex::new(config)),
     };
 
+    // Cloner le device_id pour la closure setup
+    let device_id_for_title = device_id.clone();
+
     // Lancer l'application Tauri
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -201,13 +204,13 @@ fn main() {
             get_config,
             update_config,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // Récupérer la fenêtre principale
             let window = app.get_webview_window("main").unwrap();
 
             // Définir le titre avec le Device ID
             window
-                .set_title(&format!("GhostHandDesk - {}", device_id))
+                .set_title(&format!("GhostHandDesk - {}", device_id_for_title))
                 .unwrap();
 
             println!("[TAURI] Application initialisée");
