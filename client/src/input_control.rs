@@ -8,6 +8,8 @@ use tracing::{debug, warn};
 /// Input control manager for keyboard and mouse events
 pub struct InputController {
     enigo: Enigo,
+    screen_width: i32,
+    screen_height: i32,
 }
 
 /// Represents a mouse event
@@ -45,23 +47,25 @@ pub struct KeyModifiers {
 }
 
 impl InputController {
-    /// Create a new input controller
+    /// Create a new input controller with default resolution
     pub fn new() -> Result<Self> {
+        Self::new_with_resolution(3840, 2160)
+    }
+
+    /// Create a new input controller with specific screen resolution
+    pub fn new_with_resolution(screen_width: i32, screen_height: i32) -> Result<Self> {
         let enigo = Enigo::new(&Settings::default()).map_err(|e| {
             GhostHandError::InputControl(format!("Failed to initialize input control: {}", e))
         })?;
 
-        Ok(Self { enigo })
+        Ok(Self { enigo, screen_width, screen_height })
     }
 
-    /// Obtenir la résolution totale de l'écran (approximation)
-    /// En multi-écrans, retourne une estimation basée sur le capturer
-    fn get_screen_resolution() -> (i32, i32) {
-        // TODO: Obtenir la vraie résolution multi-écrans
-        // Pour l'instant, utiliser une résolution par défaut raisonnable
-        // En production, il faudrait interroger le système pour obtenir
-        // la taille totale de l'espace d'écrans virtuels
-        (3840, 2160) // 4K par défaut
+    /// Update the screen resolution dynamically
+    pub fn set_resolution(&mut self, width: i32, height: i32) {
+        self.screen_width = width;
+        self.screen_height = height;
+        debug!("InputController resolution updated: {}x{}", width, height);
     }
 
     /// Handle a mouse event
@@ -69,7 +73,7 @@ impl InputController {
         match event {
             MouseEvent::Move { x, y } => {
                 // Normaliser les coordonnées pour éviter les débordements
-                let (max_width, max_height) = Self::get_screen_resolution();
+                let (max_width, max_height) = (self.screen_width, self.screen_height);
                 let clamped_x = x.max(0).min(max_width - 1);
                 let clamped_y = y.max(0).min(max_height - 1);
 

@@ -35,6 +35,9 @@ type Client struct {
 	Hub  *Hub
 	Send chan []byte
 
+	// Protection contre la double fermeture du canal Send
+	closed bool
+
 	// Rate limiting
 	messageCount     int
 	lastResetTime    time.Time
@@ -72,7 +75,10 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.clients[client.ID]; ok {
 				delete(h.clients, client.ID)
-				close(client.Send)
+				if !client.closed {
+					client.closed = true
+					close(client.Send)
+				}
 				log.Printf("[HUB] Client désenregistré: %s (Total: %d)", client.ID, len(h.clients))
 			}
 			h.mu.Unlock()
@@ -89,7 +95,10 @@ func (h *Hub) Run() {
 				default:
 					// Le canal est plein, déconnecter le client
 					h.mu.Lock()
-					close(client.Send)
+					if !client.closed {
+						client.closed = true
+						close(client.Send)
+					}
 					delete(h.clients, client.ID)
 					h.mu.Unlock()
 					log.Printf("[HUB] Client %s déconnecté (canal saturé)", client.ID)
@@ -121,6 +130,17 @@ func (h *Hub) GetClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// GetClientIDs retourne la liste des IDs des clients connectés
+func (h *Hub) GetClientIDs() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]string, 0, len(h.clients))
+	for id := range h.clients {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // ReadPump pompe les messages du client vers le hub
@@ -190,15 +210,30 @@ func (c *Client) WritePump() {
 }
 
 // checkRateLimit vérifie si le client dépasse la limite de messages
+// Utilise une fenêtre glissante pour éviter le burst en début de fenêtre
 func (c *Client) checkRateLimit() bool {
 	c.rateLimitMu.Lock()
 	defer c.rateLimitMu.Unlock()
 
 	now := time.Now()
+	elapsed := now.Sub(c.lastResetTime)
+
 	// Reset le compteur si 1 minute est passée
-	if now.Sub(c.lastResetTime) >= time.Minute {
+	if elapsed >= time.Minute {
 		c.messageCount = 0
 		c.lastResetTime = now
+	} else {
+		// Fenêtre glissante : calcul proportionnel du budget restant
+		// Si seulement 30s se sont écoulées, le budget est maxMessagesPerMin/2
+		elapsedFraction := float64(elapsed) / float64(time.Minute)
+		allowedSoFar := int(float64(c.maxMessagesPerMin) * elapsedFraction)
+		if allowedSoFar < 10 {
+			allowedSoFar = 10 // Minimum burst de 10 messages
+		}
+		if c.messageCount >= allowedSoFar {
+			log.Printf("[RATE_LIMIT] Client %s dépasse la limite proportionnelle (%d/%d)", c.ID, c.messageCount, allowedSoFar)
+			return false
+		}
 	}
 
 	c.messageCount++
@@ -231,6 +266,8 @@ func (c *Client) handleMessage(msg *models.Message) {
 		c.handleConnectRequest(msg)
 	case models.TypeConnectionAccepted, models.TypeConnectionRejected:
 		c.handleConnectionResponse(msg)
+	case models.TypePasswordChallenge, models.TypePasswordResponse:
+		c.handlePasswordMessage(msg)
 	case models.TypePing:
 		c.handlePing()
 	default:
@@ -321,8 +358,19 @@ func (c *Client) handleIceCandidate(msg *models.Message) {
 		return
 	}
 
+	// Valider que le destinataire est spécifié
+	if ice.To == "" {
+		log.Printf("[CLIENT] ICE candidate sans destinataire")
+		c.sendAck("IceCandidate", "error", "Destinataire non spécifié")
+		return
+	}
+
 	// Transférer le candidat au destinataire
-	c.Hub.SendToClient(ice.To, msg)
+	if err := c.Hub.SendToClient(ice.To, msg); err != nil {
+		log.Printf("[CLIENT] Erreur envoi ICE à %s: %v", ice.To, err)
+		c.sendAck("IceCandidate", "error", "Erreur d'envoi")
+		return
+	}
 
 	// Envoyer ACK de succès à l'expéditeur
 	c.sendAck("IceCandidate", "success", "")
@@ -364,8 +412,16 @@ func (c *Client) handleConnectRequest(msg *models.Message) {
 				Message: "Client cible non trouvé",
 			},
 		}
-		responseData, _ := json.Marshal(response)
-		c.Send <- responseData
+		responseData, err := json.Marshal(response)
+		if err != nil {
+			log.Printf("[CLIENT] Erreur marshal response: %v", err)
+			return
+		}
+		select {
+		case c.Send <- responseData:
+		default:
+			log.Printf("[CLIENT %s] Canal saturé, message d'erreur non envoyé", c.ID)
+		}
 
 		// Envoyer ACK d'erreur
 		c.sendAck("ConnectRequest", "error", "Client cible non trouvé")
@@ -374,11 +430,13 @@ func (c *Client) handleConnectRequest(msg *models.Message) {
 
 	// Créer la notification de demande pour le client cible
 	// On inclut l'ID de l'expéditeur pour que le client cible sache qui demande la connexion
+	// NOTE: On envoie un flag has_password au lieu du password brut
+	// Le client cible vérifie le password localement
 	notification := models.Message{
 		Type: models.TypeConnectRequest,
 		Data: map[string]interface{}{
-			"from":     c.ID,
-			"password": req.Password,
+			"from":         c.ID,
+			"has_password": req.Password != nil && *req.Password != "",
 		},
 	}
 
@@ -396,10 +454,10 @@ func (c *Client) handleConnectionResponse(msg *models.Message) {
 	switch msg.Type {
 	case models.TypeConnectionAccepted:
 		data, err := json.Marshal(msg.Data)
-	if err != nil {
-		log.Printf("[CLIENT] Erreur marshal data: %v", err)
-		return
-	}
+		if err != nil {
+			log.Printf("[CLIENT] Erreur marshal data: %v", err)
+			return
+		}
 		var accepted models.ConnectionAcceptedMessage
 		if err := json.Unmarshal(data, &accepted); err != nil {
 			log.Printf("[CLIENT] Erreur parsing connection accepted: %v", err)
@@ -410,10 +468,10 @@ func (c *Client) handleConnectionResponse(msg *models.Message) {
 
 	case models.TypeConnectionRejected:
 		data, err := json.Marshal(msg.Data)
-	if err != nil {
-		log.Printf("[CLIENT] Erreur marshal data: %v", err)
-		return
-	}
+		if err != nil {
+			log.Printf("[CLIENT] Erreur marshal data: %v", err)
+			return
+		}
 		var rejected models.ConnectionRejectedMessage
 		if err := json.Unmarshal(data, &rejected); err != nil {
 			log.Printf("[CLIENT] Erreur parsing connection rejected: %v", err)
@@ -422,6 +480,32 @@ func (c *Client) handleConnectionResponse(msg *models.Message) {
 		log.Printf("[CLIENT %s] A rejeté la connexion de %s: %s", c.ID, rejected.PeerID, rejected.Reason)
 		c.Hub.SendToClient(rejected.PeerID, msg)
 	}
+}
+
+// handlePasswordMessage route les messages PasswordChallenge et PasswordResponse vers le pair
+func (c *Client) handlePasswordMessage(msg *models.Message) {
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal password message: %v", err)
+		return
+	}
+
+	// Extraire le peer_id du message pour le routage
+	var peerMsg struct {
+		PeerID string `json:"peer_id"`
+	}
+	if err := json.Unmarshal(data, &peerMsg); err != nil {
+		log.Printf("[CLIENT] Erreur parsing password message: %v", err)
+		return
+	}
+
+	if peerMsg.PeerID == "" {
+		log.Printf("[CLIENT] Password message sans peer_id")
+		return
+	}
+
+	log.Printf("[CLIENT %s] %s vers %s", c.ID, msg.Type, peerMsg.PeerID)
+	c.Hub.SendToClient(peerMsg.PeerID, msg)
 }
 
 // handlePing traite un message de ping
@@ -434,7 +518,11 @@ func (c *Client) handlePing() {
 		log.Printf("[CLIENT] Erreur marshal pong: %v", err)
 		return
 	}
-	c.Send <- data
+	select {
+	case c.Send <- data:
+	default:
+		log.Printf("[CLIENT %s] Canal saturé, pong non envoyé", c.ID)
+	}
 }
 
 // sendAck envoie un acquittement (ACK) au client

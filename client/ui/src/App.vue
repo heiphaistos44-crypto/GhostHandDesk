@@ -119,19 +119,15 @@ onMounted(async () => {
   try {
     // Récupérer le Device ID depuis le backend Rust
     deviceId.value = await invoke<string>('get_device_id');
-    console.log('Device ID:', deviceId.value);
 
     // Initialiser la session au démarrage
     await invoke('initialize_session');
-    console.log('Session initialisée');
 
     // Démarrer l'écoute des demandes de connexion entrantes
     await invoke('start_listening_for_requests');
-    console.log('Écoute des demandes démarrée');
 
     // Écouter les events de demande de connexion
     await listen<ConnectionRequest>('connection-request', (event) => {
-      console.log('Demande de connexion reçue:', event.payload);
       pendingRequest.value = event.payload;
       connectionRequestVisible.value = true;
     });
@@ -148,7 +144,6 @@ async function handleConnect(targetId: string, password: string | null) {
   connectionError.value = '';
 
   try {
-    console.log('Tentative de connexion à:', targetId);
 
     await invoke('connect_to_device', {
       targetId,
@@ -157,12 +152,10 @@ async function handleConnect(targetId: string, password: string | null) {
 
     connected.value = true;
     connectedTo.value = targetId;
-    console.log('Connexion établie !');
 
     // Auto-démarrer la réception vidéo
     try {
       await invoke('start_receiving');
-      console.log('Réception vidéo démarrée');
     } catch (error) {
       console.error('Erreur démarrage réception:', error);
     }
@@ -180,7 +173,6 @@ async function handleAcceptRequest() {
   connectionRequestVisible.value = false;
 
   try {
-    console.log('Acceptation de la connexion de:', pendingRequest.value.from);
 
     await invoke('accept_connection', {
       from: pendingRequest.value.from
@@ -188,15 +180,12 @@ async function handleAcceptRequest() {
 
     connected.value = true;
     connectedTo.value = pendingRequest.value.from;
-    console.log('Connexion acceptée et établie !');
 
     // Auto-démarrer le streaming et l'input handler
     try {
       await invoke('start_streaming');
-      console.log('Streaming démarré');
 
       await invoke('start_input_handler');
-      console.log('Input handler démarré');
     } catch (error) {
       console.error('Erreur démarrage streaming/input:', error);
     }
@@ -211,14 +200,12 @@ async function handleRejectRequest() {
   connectionRequestVisible.value = false;
 
   try {
-    console.log('Rejet de la connexion de:', pendingRequest.value.from);
 
     await invoke('reject_connection', {
       from: pendingRequest.value.from,
       reason: 'Refusé par l\'utilisateur'
     });
 
-    console.log('Connexion rejetée');
   } catch (error) {
     console.error('Erreur rejet connexion:', error);
   }
@@ -229,7 +216,6 @@ async function handleDisconnect() {
     await invoke('disconnect');
     connected.value = false;
     connectedTo.value = '';
-    console.log('Déconnecté');
   } catch (error) {
     console.error('Erreur de déconnexion:', error);
   }
@@ -239,12 +225,10 @@ function copyDeviceId() {
   if (deviceId.value) {
     navigator.clipboard.writeText(deviceId.value);
     // Optionnel: afficher une notification
-    console.log('Device ID copié !');
   }
 }
 
-function handleSettingsUpdate(settings: any) {
-  console.log('Mise à jour paramètres:', settings);
+function handleSettingsUpdate(_settings: any) {
   // TODO: Envoyer au backend
 }
 </script>

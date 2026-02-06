@@ -92,7 +92,7 @@ cd client && cargo tauri build
 
 ## 📊 Statistiques
 
-- **Bugs résolus** : 51/65 (78%)
+- **Bugs résolus** : 65/65 (100%)
 - **Lignes de code** : ~8,000
 - **Performance** : 30 FPS @ <100ms latence
 

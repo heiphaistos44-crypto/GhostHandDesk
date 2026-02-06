@@ -1,13 +1,11 @@
-// Prevents additional console window on Windows in release
-// TEMPORAIREMENT DÉSACTIVÉ POUR DEBUG
-// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Désactivé pour debug
+
+mod storage_commands;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State, AppHandle};
 use tokio::sync::Mutex;
-
-// Import des modules du client
 use ghost_hand_client::audit::{audit_log, init_global_logger, AuditEvent, AuditLevel};
 use ghost_hand_client::config::{Config, VideoCodec};
 use ghost_hand_client::network::{generate_device_id, SessionManager};
@@ -17,15 +15,13 @@ use ghost_hand_client::streaming::{Streamer, Receiver, InputHandler};
 use ghost_hand_client::screen_capture;
 use ghost_hand_client::video_encoder;
 
-// Structure pour une demande de connexion entrante
 #[derive(Clone, Serialize)]
 struct ConnectionRequest {
     from: String,
     timestamp: u64,
-    expires_at: u64, // Timestamp d'expiration (timestamp + 60 secondes)
+    expires_at: u64,
 }
 
-// État global de l'application
 struct AppState {
     device_id: String,
     session_manager: Arc<Mutex<Option<SessionManager>>>,
@@ -34,11 +30,6 @@ struct AppState {
     streamer_handle: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
-// Note: Le serveur de signalement doit être lancé MANUELLEMENT en externe
-// avec le script 1-SERVEUR.bat pour permettre plusieurs instances
-// La fonction start_signaling_server() a été supprimée
-
-// Structures pour les événements
 #[derive(Clone, Serialize)]
 #[allow(dead_code)]
 struct VideoFramePayload {
@@ -79,95 +70,17 @@ struct KeyModifiers {
     meta: bool,
 }
 
-// ============================================================================
-// Commandes Storage
-// ============================================================================
-
-/// Obtenir l'historique des connexions
-#[tauri::command]
-fn get_connection_history(limit: Option<usize>) -> Result<Vec<ConnectionHistory>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let history = storage.get_connection_history(limit);
-            Ok(history.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les pairs connus
-#[tauri::command]
-fn get_known_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let peers = storage.get_all_known_peers();
-            Ok(peers.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les pairs favoris
-#[tauri::command]
-fn get_favorite_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let peers = storage.get_favorite_peers();
-            Ok(peers.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Marquer un pair comme favori
-#[tauri::command]
-fn set_peer_favorite(peer_id: String, favorite: bool) -> Result<(), String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(mut storage) = storage_mutex.lock() {
-            if storage.set_peer_favorite(&peer_id, favorite) {
-                storage.save().map_err(|e| format!("Erreur sauvegarde: {}", e))?;
-                Ok(())
-            } else {
-                Err(format!("Pair {} introuvable", peer_id))
-            }
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les statistiques du storage
-#[tauri::command]
-async fn get_storage_stats() -> Result<ghost_hand_client::storage::StorageStats, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            Ok(storage.get_stats())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-// ============================================================================
+// Commandes Storage importées depuis storage_commands.rs
+use storage_commands::{
+    get_connection_history, get_known_peers, get_favorite_peers,
+    set_peer_favorite, get_storage_stats,
+};
 
 /// Nettoyer les requêtes de connexion expirées
 fn cleanup_old_requests(requests: &mut Vec<ConnectionRequest>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let before_count = requests.len();
@@ -244,7 +157,7 @@ async fn connect_to_device(
         if let Ok(mut storage) = storage_mutex.lock() {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis() as u64;
 
             let connection_id = format!("conn-{}-{}", timestamp, target_id);
@@ -613,54 +526,56 @@ async fn start_listening_for_requests(
     // Démarrer la boucle d'écoute en arrière-plan
     tauri::async_runtime::spawn(async move {
         loop {
-            // Recevoir un message (bloque jusqu'à réception)
-            // Note: le lock est maintenu pendant l'attente, ce qui est acceptable
-            // car cette task est la seule à accéder à la session pendant cette phase
-            let mut session_guard = session_manager.lock().await;
+            // FIX DEADLOCK: Recevoir le message dans un scope séparé pour libérer le lock
+            let msg_result = {
+                let mut session_guard = session_manager.lock().await;
+                if let Some(session) = session_guard.as_mut() {
+                    session.receive_message().await
+                } else {
+                    println!("[LISTENER] Session fermée, arrêt de l'écoute");
+                    return; // Sortir si session fermée
+                }
+            }; // Lock libéré ici automatiquement
 
-            if let Some(session) = session_guard.as_mut() {
-                match session.receive_message().await {
-                    Ok(msg) => {
-                        if msg.is_type("ConnectRequest") {
-                            if let Some(from) = msg.get_str("from") {
-                                println!("[LISTENER] Demande de connexion reçue de {}", from);
+            // Traiter le message après avoir libéré le lock
+            match msg_result {
+                Ok(msg) => {
+                    if msg.is_type("ConnectRequest") {
+                        if let Some(from) = msg.get_str("from") {
+                            println!("[LISTENER] Demande de connexion reçue de {}", from);
 
-                                // Ajouter à la liste des demandes en attente
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs();
+                            // Ajouter à la liste des demandes en attente
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
 
-                                let request = ConnectionRequest {
-                                    from: from.clone(),
-                                    timestamp: now,
-                                    expires_at: now + 60, // Expire après 60 secondes
-                                };
+                            let request = ConnectionRequest {
+                                from: from.clone(),
+                                timestamp: now,
+                                expires_at: now + 60, // Expire après 60 secondes
+                            };
 
-                                // Nettoyer les vieilles requêtes avant d'ajouter la nouvelle
-                                let mut requests_guard = pending_requests.lock().await;
-                                cleanup_old_requests(&mut *requests_guard);
-                                requests_guard.push(request.clone());
+                            // Nettoyer les vieilles requêtes avant d'ajouter la nouvelle
+                            let mut requests_guard = pending_requests.lock().await;
+                            cleanup_old_requests(&mut *requests_guard);
+                            requests_guard.push(request.clone());
+                            drop(requests_guard); // Libérer explicitement le lock
 
-                                // Émettre un event vers l'UI
-                                if let Err(e) = window.emit("connection-request", request) {
-                                    eprintln!("[TAURI] Impossible d'émettre connection-request: {}", e);
-                                }
+                            // Émettre un event vers l'UI
+                            if let Err(e) = window.emit("connection-request", request) {
+                                eprintln!("[TAURI] Impossible d'émettre connection-request: {}", e);
                             }
                         }
-                        // Les autres messages (Offer, Answer, ICE) sont gérés directement
-                        // par les méthodes de SessionManager (accept_connection, connect_to_device, etc.)
                     }
-                    Err(e) => {
-                        eprintln!("[LISTENER] Erreur de réception: {}", e);
-                        break;
-                    }
+                    // Les autres messages (Offer, Answer, ICE) sont gérés directement
+                    // par les méthodes de SessionManager (accept_connection, connect_to_device, etc.)
                 }
-            } else {
-                println!("[LISTENER] Session fermée, arrêt de l'écoute");
-                break;
+                Err(e) => {
+                    eprintln!("[LISTENER] Erreur de réception: {}", e);
+                    break;
+                }
             }
-            // Le lock est automatiquement libéré ici à la fin du scope
             // Pas besoin de délai car receive_message() bloque déjà
         }
     });
@@ -772,12 +687,18 @@ fn main() {
             // Le serveur doit être lancé avec 1-SERVEUR.bat qui configure le port 9000
 
             // Récupérer la fenêtre principale
-            let window = app.get_webview_window("main").unwrap();
+            let window = match app.get_webview_window("main") {
+                Some(w) => w,
+                None => {
+                    eprintln!("[TAURI] Fenêtre principale non trouvée");
+                    return Ok(());
+                }
+            };
 
             // Définir le titre avec le Device ID
-            window
-                .set_title(&format!("GhostHandDesk - {}", device_id_for_title))
-                .unwrap();
+            if let Err(e) = window.set_title(&format!("GhostHandDesk - {}", device_id_for_title)) {
+                eprintln!("[TAURI] Impossible de définir le titre: {}", e);
+            }
 
             println!("[TAURI] Application initialisée");
             println!("[TAURI] Interface disponible");

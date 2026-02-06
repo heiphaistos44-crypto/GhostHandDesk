@@ -22,7 +22,8 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 // Constantes réseau
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const CONNECTION_TIMEOUT_SECS: u64 = 30;
-const CHANNEL_BUFFER_SIZE: usize = 256;
+const MAX_SDP_SIZE: usize = 100 * 1024; // 100 KB max pour un SDP
+
 
 /// Signaling message types - format compatible avec le serveur Go
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +122,27 @@ impl SignalMessage {
         }
     }
 
+    pub fn password_challenge(peer_id: String, challenge: String, salt: String) -> Self {
+        Self {
+            msg_type: "PasswordChallenge".to_string(),
+            data: Some(serde_json::json!({
+                "peer_id": peer_id,
+                "challenge": challenge,
+                "salt": salt
+            })),
+        }
+    }
+
+    pub fn password_response(peer_id: String, response: String) -> Self {
+        Self {
+            msg_type: "PasswordResponse".to_string(),
+            data: Some(serde_json::json!({
+                "peer_id": peer_id,
+                "response": response
+            })),
+        }
+    }
+
     // Méthodes utilitaires pour extraire les données
     pub fn get_str(&self, field: &str) -> Option<String> {
         self.data.as_ref()?.get(field)?.as_str().map(|s| s.to_string())
@@ -146,6 +168,8 @@ pub struct SignalingClient {
     pub tx: Option<mpsc::UnboundedSender<SignalMessage>>,
     rx: Option<mpsc::UnboundedReceiver<SignalMessage>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    auto_reconnect: bool,
+    max_backoff_secs: u64,
 }
 
 impl SignalingClient {
@@ -156,6 +180,40 @@ impl SignalingClient {
             tx: None,
             rx: None,
             tasks: Vec::new(),
+            auto_reconnect: false,
+            max_backoff_secs: 60,
+        }
+    }
+
+    /// Enable auto-reconnect with exponential backoff
+    pub fn with_auto_reconnect(mut self, max_backoff_secs: u64) -> Self {
+        self.auto_reconnect = true;
+        self.max_backoff_secs = max_backoff_secs;
+        self
+    }
+
+    /// Connect with auto-reconnect (exponential backoff: 1s, 2s, 4s, ... up to max_backoff)
+    pub async fn connect_with_reconnect(&mut self) -> Result<()> {
+        let mut backoff_secs = 1u64;
+
+        loop {
+            match self.connect().await {
+                Ok(()) => {
+                    info!("Connexion au serveur de signaling établie");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if !self.auto_reconnect {
+                        return Err(e);
+                    }
+                    warn!(
+                        "Échec de connexion, nouvelle tentative dans {} secondes: {}",
+                        backoff_secs, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(self.max_backoff_secs);
+                }
+            }
         }
     }
 
@@ -394,6 +452,13 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
+        // Validation taille SDP
+        if offer.sdp.len() > MAX_SDP_SIZE {
+            return Err(GhostHandError::WebRTC(format!(
+                "SDP offer trop grand: {} bytes (max {})", offer.sdp.len(), MAX_SDP_SIZE
+            )));
+        }
+
         info!("Offre WebRTC créée avec succès");
 
         // 4. Retourner SDP string
@@ -427,6 +492,13 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
+        // Validation taille SDP
+        if answer.sdp.len() > MAX_SDP_SIZE {
+            return Err(GhostHandError::WebRTC(format!(
+                "SDP answer trop grand: {} bytes (max {})", answer.sdp.len(), MAX_SDP_SIZE
+            )));
+        }
+
         info!("Réponse WebRTC créée avec succès");
 
         // 5. Retourner answer SDP
@@ -435,6 +507,13 @@ impl WebRTCConnection {
 
     /// Set remote description
     pub async fn set_remote_description(&self, sdp: &str, sdp_type: RTCSdpType) -> Result<()> {
+        // Validation taille SDP reçu
+        if sdp.len() > MAX_SDP_SIZE {
+            return Err(GhostHandError::WebRTC(format!(
+                "SDP reçu trop grand: {} bytes (max {})", sdp.len(), MAX_SDP_SIZE
+            )));
+        }
+
         info!("Définition de la description distante (type: {:?})", sdp_type);
 
         // Créer la session description selon le type
@@ -538,11 +617,12 @@ impl SessionManager {
         offers.clear();
     }
 
-    /// Initialize and connect to signaling server
+    /// Initialize and connect to signaling server with auto-reconnect
     pub async fn initialize(&mut self) -> Result<()> {
         let mut signaling =
-            SignalingClient::new(self.config.server_url.clone(), self.device_id.clone());
-        signaling.connect().await?;
+            SignalingClient::new(self.config.server_url.clone(), self.device_id.clone())
+                .with_auto_reconnect(60);
+        signaling.connect_with_reconnect().await?;
         self.signaling = Some(signaling);
 
         Ok(())
@@ -579,6 +659,7 @@ impl SessionManager {
 
         // Sauvegarder le fait qu'un password est fourni avant de le move
         let password_was_used = password.is_some();
+        let password_clone = password.clone();
 
         // 1. Envoyer ConnectRequest et attendre ConnectionAccepted
         self.signaling.as_ref().ok_or_else(|| {
@@ -598,6 +679,33 @@ impl SessionManager {
                         // Le message vient du target qui a accepté
                         info!("Connexion acceptée par {}", target_id);
                         break;
+                    } else if msg.is_type("PasswordChallenge") {
+                        // Le host demande une vérification de password
+                        info!("Challenge de password reçu de {}", target_id);
+                        if let (Some(challenge_b64), Some(salt_b64)) = (msg.get_str("challenge"), msg.get_str("salt")) {
+                            if let Some(ref pwd) = password_clone {
+                                use base64::prelude::*;
+                                let challenge = BASE64_STANDARD.decode(&challenge_b64).map_err(|e| {
+                                    GhostHandError::Network(format!("Invalid challenge: {}", e))
+                                })?;
+                                let salt = BASE64_STANDARD.decode(&salt_b64).map_err(|e| {
+                                    GhostHandError::Network(format!("Invalid salt: {}", e))
+                                })?;
+
+                                let response = crate::crypto::compute_challenge_response(pwd, &salt, &challenge);
+
+                                self.signaling.as_ref().unwrap().send(
+                                    SignalMessage::password_response(target_id.clone(), response)
+                                ).await?;
+
+                                info!("Réponse au challenge envoyée");
+                            } else {
+                                return Err(GhostHandError::network_with_code(
+                                    error_codes::NETWORK_CONNECTION_FAILED,
+                                    "Le host requiert un password mais aucun n'a été fourni"
+                                ));
+                            }
+                        }
                     } else if msg.is_type("ConnectionRejected") {
                         if let Some(reason) = msg.get_str("reason") {
                             return Err(GhostHandError::network_with_code(
@@ -611,7 +719,6 @@ impl SessionManager {
                             ));
                         }
                     } else if msg.is_type("Error") {
-                        // Gérer les messages d'erreur du serveur
                         if let Some(error_msg) = msg.get_str("message") {
                             return Err(GhostHandError::network_with_code(
                                 error_codes::NETWORK_INVALID_MESSAGE,
@@ -624,7 +731,6 @@ impl SessionManager {
                             ));
                         }
                     } else {
-                        // Ignorer les autres messages (ils seront traités ailleurs)
                         debug!("Message ignoré en attente de ConnectionAccepted: {:?}", msg.msg_type);
                     }
                 }
@@ -949,6 +1055,74 @@ impl SessionManager {
     pub async fn accept_connection(&mut self, from: String) -> Result<()> {
         info!("Acceptation de la connexion de {}", from);
 
+        // Vérification de password si configuré
+        if let Some(ref password_hash) = self.config.security_config.password_hash {
+            info!("Password configuré, envoi du challenge...");
+
+            // Générer un challenge
+            let challenge = crate::crypto::generate_challenge()?;
+            let salt = crate::crypto::extract_salt_from_hash(password_hash)?;
+
+            use base64::prelude::*;
+            let challenge_b64 = BASE64_STANDARD.encode(&challenge);
+            let salt_b64 = BASE64_STANDARD.encode(&salt);
+
+            // Envoyer le challenge
+            self.signaling.as_ref().ok_or_else(|| {
+                GhostHandError::Network("Not connected to signaling server".to_string())
+            })?.send(SignalMessage::password_challenge(from.clone(), challenge_b64, salt_b64)).await?;
+
+            // Attendre la réponse
+            let timeout = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS));
+            tokio::pin!(timeout);
+
+            let password_ok = loop {
+                tokio::select! {
+                    Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                        if msg.is_type("PasswordResponse") {
+                            if let Some(response) = msg.get_str("response") {
+                                let valid = crate::crypto::verify_challenge_response(
+                                    password_hash, &challenge, &response
+                                )?;
+                                break valid;
+                            }
+                        } else {
+                            debug!("Message ignoré en attente de PasswordResponse: {:?}", msg.msg_type);
+                        }
+                    }
+                    _ = &mut timeout => {
+                        return Err(GhostHandError::network_with_code(
+                            error_codes::NETWORK_TIMEOUT,
+                            "Timeout en attente de la réponse au challenge"
+                        ));
+                    }
+                }
+            };
+
+            if !password_ok {
+                // Rejeter la connexion
+                self.signaling.as_ref().unwrap().send(
+                    SignalMessage::connection_rejected(from.clone(), "Password incorrect".to_string())
+                ).await?;
+
+                audit_log(
+                    AuditLevel::Security,
+                    AuditEvent::SecurityError {
+                        error_code: "PASSWORD_FAILED".to_string(),
+                        description: "Échec de vérification du password".to_string(),
+                        peer_id: Some(from.clone()),
+                    },
+                );
+
+                return Err(GhostHandError::network_with_code(
+                    error_codes::NETWORK_CONNECTION_FAILED,
+                    "Password incorrect"
+                ));
+            }
+
+            info!("Password vérifié avec succès pour {}", from);
+        }
+
         // 1. Envoyer l'acceptation
         self.signaling.as_ref().ok_or_else(|| {
             GhostHandError::Network("Not connected to signaling server".to_string())
@@ -1043,7 +1217,7 @@ pub fn generate_device_id() -> String {
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis();
 
     format!("GHD-{:x}", timestamp)
@@ -1103,10 +1277,8 @@ mod tests {
 
     #[test]
     fn test_signal_message_serialization() {
-        // Test sérialisation Register
-        let msg = SignalMessage::Register {
-            device_id: "GHD-test123".to_string(),
-        };
+        // Test sérialisation Register (SignalMessage est un struct, pas un enum)
+        let msg = SignalMessage::register("GHD-test123".to_string());
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("Register"));
@@ -1114,12 +1286,8 @@ mod tests {
 
         // Test désérialisation
         let deserialized: SignalMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            SignalMessage::Register { device_id } => {
-                assert_eq!(device_id, "GHD-test123");
-            }
-            _ => panic!("Mauvais type de message"),
-        }
+        assert!(deserialized.is_type("Register"));
+        assert_eq!(deserialized.get_str("device_id").unwrap(), "GHD-test123");
     }
 
     #[test]

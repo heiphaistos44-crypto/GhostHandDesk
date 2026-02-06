@@ -119,6 +119,7 @@ const isFullscreen = ref(false);
 let frameCount = 0;
 let lastFpsUpdate = Date.now();
 let unlistenVideo: UnlistenFn | null = null;
+let fpsIntervalId: ReturnType<typeof setInterval> | null = null;
 
 // Lifecycle
 onMounted(async () => {
@@ -138,13 +139,17 @@ onMounted(async () => {
   }
 
   // Calculer FPS
-  setInterval(updateFps, 1000);
+  fpsIntervalId = setInterval(updateFps, 1000);
 });
 
 onUnmounted(() => {
   // Nettoyer les listeners
   if (unlistenVideo) {
     unlistenVideo();
+  }
+  // Nettoyer le timer FPS pour éviter une fuite mémoire
+  if (fpsIntervalId) {
+    clearInterval(fpsIntervalId);
   }
 });
 
@@ -273,7 +278,7 @@ async function handleMouseDown(event: MouseEvent) {
         x,
         y,
         button: event.button === 0 ? 'left' : event.button === 2 ? 'right' : 'middle',
-        type: 'press',
+        type: 'down',
       },
     });
   } catch (error) {
@@ -295,7 +300,7 @@ async function handleMouseUp(event: MouseEvent) {
         x,
         y,
         button: event.button === 0 ? 'left' : event.button === 2 ? 'right' : 'middle',
-        type: 'release',
+        type: 'up',
       },
     });
   } catch (error) {
@@ -335,7 +340,7 @@ async function handleWheel(event: WheelEvent) {
         y: 0,
         button: 'none',
         type: 'scroll',
-        delta: event.deltaY,
+        delta: Math.round(event.deltaY),
       },
     });
   } catch (error) {
@@ -352,7 +357,7 @@ async function handleKeyDown(event: KeyboardEvent) {
       event: {
         key: event.key,
         code: event.code,
-        type: 'press',
+        type: 'keydown',
         modifiers: {
           ctrl: event.ctrlKey,
           shift: event.shiftKey,
@@ -374,7 +379,7 @@ async function handleKeyUp(event: KeyboardEvent) {
       event: {
         key: event.key,
         code: event.code,
-        type: 'release',
+        type: 'keyup',
         modifiers: {
           ctrl: event.ctrlKey,
           shift: event.shiftKey,
@@ -423,7 +428,6 @@ function captureScreenshot() {
 }
 
 function updateQuality() {
-  console.log('Qualité mise à jour:', quality.value);
   // TODO: Envoyer au backend pour ajuster le framerate/bitrate
 }
 </script>

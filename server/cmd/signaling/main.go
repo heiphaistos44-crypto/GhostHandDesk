@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,6 +16,47 @@ import (
 	"github.com/heiphaistos44-crypto/GhostHandDesk/server/internal/signaling"
 	"github.com/joho/godotenv"
 )
+
+// simpleRateLimiter implémente un rate limiter basique par IP
+type simpleRateLimiter struct {
+	mu       sync.Mutex
+	requests map[string][]time.Time
+	limit    int
+	window   time.Duration
+}
+
+func newSimpleRateLimiter(limit int, window time.Duration) *simpleRateLimiter {
+	return &simpleRateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+}
+
+func (rl *simpleRateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+
+	// Nettoyer les anciennes requêtes
+	reqs := rl.requests[ip]
+	valid := reqs[:0]
+	for _, t := range reqs {
+		if t.After(cutoff) {
+			valid = append(valid, t)
+		}
+	}
+
+	if len(valid) >= rl.limit {
+		rl.requests[ip] = valid
+		return false
+	}
+
+	rl.requests[ip] = append(valid, now)
+	return true
+}
 
 func main() {
 	// Charger les variables d'environnement depuis .env (optionnel)
@@ -40,32 +83,86 @@ func main() {
 	// Stocker le temps de démarrage pour calculer l'uptime
 	startTime := time.Now()
 
+	// Rate limiter pour les endpoints HTTP (30 req/min par IP)
+	httpLimiter := newSimpleRateLimiter(30, time.Minute)
+
 	// Configurer les routes HTTP
 	mux := http.NewServeMux()
 
 	// Route WebSocket pour la signalisation
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		signaling.HandleWebSocket(hub, w, r)
+		signaling.HandleWebSocket(hub, cfg, w, r)
 	})
 
 	// Route de health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if !httpLimiter.allow(r.RemoteAddr) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "healthy",
 			"clients": hub.GetClientCount(),
-		})
+		}); err != nil {
+			log.Printf("[MAIN] Erreur encodage health: %v", err)
+		}
 	})
 
-	// Route de statistiques
+	// Route de statistiques avec pagination des clients
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		if !httpLimiter.allow(r.RemoteAddr) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+
+		// Parser les paramètres de pagination
+		page := 1
+		perPage := 50
+		if p := r.URL.Query().Get("page"); p != "" {
+			if v, err := strconv.Atoi(p); err == nil && v >= 1 {
+				page = v
+			}
+		}
+		if pp := r.URL.Query().Get("per_page"); pp != "" {
+			if v, err := strconv.Atoi(pp); err == nil && v >= 1 && v <= 100 {
+				perPage = v
+			}
+		}
+
+		// Récupérer tous les IDs et paginer
+		allIDs := hub.GetClientIDs()
+		totalClients := len(allIDs)
+		totalPages := (totalClients + perPage - 1) / perPage
+		if totalPages == 0 {
+			totalPages = 1
+		}
+
+		// Calculer les indices de pagination
+		start := (page - 1) * perPage
+		end := start + perPage
+		if start > totalClients {
+			start = totalClients
+		}
+		if end > totalClients {
+			end = totalClients
+		}
+
+		pagedIDs := allIDs[start:end]
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"total_clients": hub.GetClientCount(),
-			"uptime":        time.Since(startTime).String(),
-			"max_clients":   cfg.MaxClients,
-		})
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
+			"total_clients":     totalClients,
+			"connected_clients": pagedIDs,
+			"page":              page,
+			"per_page":          perPage,
+			"total_pages":       totalPages,
+			"uptime":            time.Since(startTime).String(),
+			"max_clients":       cfg.MaxClients,
+		}); err != nil {
+			log.Printf("[MAIN] Erreur encodage stats: %v", err)
+		}
 	})
 
 	// Créer le serveur HTTPS
@@ -88,8 +185,16 @@ func main() {
 		log.Printf("  - http://localhost%s/health (Health check)", cfg.Host)
 		log.Printf("  - http://localhost%s/stats (Statistiques)", cfg.Host)
 
-		// Démarrer en HTTP simple (sans TLS) pour localhost
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// Démarrer en HTTPS si les certificats sont fournis, sinon HTTP
+		var err error
+		if cfg.CertFile != "" && cfg.KeyFile != "" {
+			log.Printf("[MAIN] Démarrage en mode HTTPS (cert: %s)", cfg.CertFile)
+			err = server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile)
+		} else {
+			log.Println("[MAIN] Démarrage en mode HTTP (pas de certificats TLS)")
+			err = server.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[MAIN] Erreur de démarrage du serveur: %v", err)
 		}
 	}()

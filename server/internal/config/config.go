@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Config contient toute la configuration du serveur
@@ -24,6 +25,9 @@ type Config struct {
 
 	// Timeout de connexion en secondes
 	ConnectionTimeout int
+
+	// Origines WebSocket autorisées (CheckOrigin)
+	AllowedOrigins []string
 }
 
 // LoadFromEnv charge la configuration depuis les variables d'environnement
@@ -34,14 +38,39 @@ func LoadFromEnv() *Config {
 	if err == nil {
 		exeDir = filepath.Dir(exePath)
 	} else {
-		// Fallback sur le répertoire de travail actuel
 		exeDir, _ = os.Getwd()
 	}
 
-	// Chemins optionnels pour HTTPS (non requis pour HTTP simple)
-	// Si vous voulez activer HTTPS, définissez CERT_FILE et KEY_FILE dans l'environnement
-	defaultCertFile := ""
-	defaultKeyFile := ""
+	// Chemins optionnels pour HTTPS (relatifs au dossier de l'exécutable)
+	defaultCertFile := filepath.Join(exeDir, "cert.pem")
+	defaultKeyFile := filepath.Join(exeDir, "key.pem")
+	// Ne pas utiliser les chemins par défaut si les fichiers n'existent pas
+	if _, err := os.Stat(defaultCertFile); os.IsNotExist(err) {
+		defaultCertFile = ""
+	}
+	if _, err := os.Stat(defaultKeyFile); os.IsNotExist(err) {
+		defaultKeyFile = ""
+	}
+
+	// Origines autorisées par défaut
+	defaultOrigins := []string{
+		"http://localhost:9000",
+		"http://127.0.0.1:9000",
+		"http://localhost:1420",
+		"http://127.0.0.1:1420",
+		"tauri://localhost",
+	}
+
+	allowedOrigins := defaultOrigins
+	if originsEnv := os.Getenv("ALLOWED_ORIGINS"); originsEnv != "" {
+		allowedOrigins = []string{}
+		for _, origin := range strings.Split(originsEnv, ",") {
+			origin = strings.TrimSpace(origin)
+			if origin != "" {
+				allowedOrigins = append(allowedOrigins, origin)
+			}
+		}
+	}
 
 	return &Config{
 		Host:              getEnv("SERVER_HOST", ":9000"),
@@ -50,6 +79,7 @@ func LoadFromEnv() *Config {
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		MaxClients:        getEnvAsInt("MAX_CLIENTS", 1000),
 		ConnectionTimeout: getEnvAsInt("CONNECTION_TIMEOUT", 60),
+		AllowedOrigins:    allowedOrigins,
 	}
 }
 

@@ -111,7 +111,7 @@ impl ScreenCapturer for XCapCapturer {
         // Utiliser un timestamp réel en millisecondes
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         Ok(Frame {
@@ -128,16 +128,14 @@ impl ScreenCapturer for XCapCapturer {
             .monitors
             .iter()
             .enumerate()
-            .map(|(idx, _monitor)| {
-                // xcap Monitor doesn't have direct getter methods in this version
-                // We'll use default values that will be updated on first capture
+            .map(|(idx, monitor)| {
                 Display {
                     id: idx as u32,
                     name: format!("Monitor {}", idx),
-                    width: 1920, // Default, will be updated on first capture
-                    height: 1080,
-                    x: 0,
-                    y: 0,
+                    width: monitor.width() as u32,
+                    height: monitor.height() as u32,
+                    x: monitor.x(),
+                    y: monitor.y(),
                     is_primary: idx == 0,
                 }
             })
@@ -161,9 +159,12 @@ impl ScreenCapturer for XCapCapturer {
     }
 
     fn get_resolution(&self) -> (u32, u32) {
-        // Return a default resolution for now
-        // Will be updated when we capture a frame
-        (1920, 1080)
+        if let Some(idx) = self.current_monitor {
+            if let Some(monitor) = self.monitors.get(idx) {
+                return (monitor.width() as u32, monitor.height() as u32);
+            }
+        }
+        (1920, 1080) // Fallback
     }
 }
 

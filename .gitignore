@@ -34,24 +34,7 @@ lerna-debug.log*
 
 # OS
 .DS_Store
-Thumbs.db
-desktop.ini
-*.swp
-*.swo
-*~
 
-# IDE
-.vscode/
-.idea/
-*.iml
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Environment
-.env
 .env.local
 .env.*.local
 

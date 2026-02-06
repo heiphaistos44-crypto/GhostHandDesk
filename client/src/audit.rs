@@ -163,7 +163,7 @@ impl AuditLogger {
     pub fn log_with_metadata(&self, level: AuditLevel, event: AuditEvent, metadata: Option<serde_json::Value>) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         let entry = AuditEntry {
@@ -198,7 +198,9 @@ impl AuditLogger {
 
     /// Écrire une ligne dans le fichier de log avec rotation automatique
     fn write_to_file(&self, json: &str) -> std::io::Result<()> {
-        let mut file_guard = self.file.lock().unwrap();
+        let mut file_guard = self.file.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Mutex poisoned: {}", e))
+        })?;
 
         if let Some(file) = file_guard.as_mut() {
             // Vérifier la taille du fichier
@@ -207,7 +209,9 @@ impl AuditLogger {
                 // Rotation : renommer le fichier actuel et créer un nouveau
                 drop(file_guard); // Libérer le lock
                 self.rotate_log()?;
-                file_guard = self.file.lock().unwrap();
+                file_guard = self.file.lock().map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("Mutex poisoned: {}", e))
+                })?;
             }
 
             if let Some(file) = file_guard.as_mut() {
@@ -223,14 +227,18 @@ impl AuditLogger {
     fn rotate_log(&self) -> std::io::Result<()> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let archived_name = format!("audit_{}.jsonl", timestamp);
-        let archived_path = self.log_path.parent().unwrap().join(archived_name);
+        let archived_path = self.log_path.parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No parent directory for log path"))?
+            .join(archived_name);
 
         // Fermer le fichier actuel
-        *self.file.lock().unwrap() = None;
+        *self.file.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Mutex poisoned: {}", e))
+        })? = None;
 
         // Renommer
         std::fs::rename(&self.log_path, archived_path)?;
@@ -241,7 +249,9 @@ impl AuditLogger {
             .append(true)
             .open(&self.log_path)?;
 
-        *self.file.lock().unwrap() = Some(new_file);
+        *self.file.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Mutex poisoned: {}", e))
+        })? = Some(new_file);
 
         info!("Audit log rotation effectuée");
 

@@ -78,6 +78,10 @@ pub struct SecurityConfig {
 
     /// Path to certificate (for custom CA)
     pub cert_path: Option<PathBuf>,
+
+    /// Password hash for incoming connection verification (PBKDF2)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
 }
 
 impl Default for Config {
@@ -149,6 +153,7 @@ impl Default for SecurityConfig {
             e2e_encryption: true,
             require_auth: true,
             cert_path: None,
+            password_hash: None,
         }
     }
 }

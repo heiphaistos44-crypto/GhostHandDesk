@@ -1,6 +1,5 @@
 package models
 
-import "time"
 
 // MessageType représente le type de message de signalement
 type MessageType string
@@ -14,6 +13,8 @@ const (
 	TypeConnectRequest     MessageType = "ConnectRequest"
 	TypeConnectionAccepted MessageType = "ConnectionAccepted"
 	TypeConnectionRejected MessageType = "ConnectionRejected"
+	TypePasswordChallenge  MessageType = "PasswordChallenge"
+	TypePasswordResponse   MessageType = "PasswordResponse"
 	TypePing               MessageType = "Ping"
 	TypePong               MessageType = "Pong"
 	TypeError              MessageType = "Error"
@@ -71,6 +72,19 @@ type ConnectionRejectedMessage struct {
 	Reason string `json:"reason"`
 }
 
+// PasswordChallengeMessage - challenge de vérification de password
+type PasswordChallengeMessage struct {
+	PeerID    string `json:"peer_id"`
+	Challenge string `json:"challenge"`
+	Salt      string `json:"salt"`
+}
+
+// PasswordResponseMessage - réponse au challenge de password
+type PasswordResponseMessage struct {
+	PeerID   string `json:"peer_id"`
+	Response string `json:"response"`
+}
+
 // ErrorMessage - message d'erreur
 type ErrorMessage struct {
 	Code    int    `json:"code"`
@@ -84,10 +98,5 @@ type AckMessage struct {
 	Message     string `json:"message,omitempty"`
 }
 
-// Client représente un client connecté
-type Client struct {
-	ID             string
-	Connection     interface{} // *websocket.Conn (évite l'import circulaire)
-	LastSeen       time.Time
-	ConnectedPeers map[string]bool
-}
+// Note: La struct Client active est dans signaling/hub.go
+// Cette struct est conservée comme référence pour les packages externes si nécessaire

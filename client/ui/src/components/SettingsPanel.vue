@@ -249,7 +249,6 @@ function handleClose() {
 function handleSave() {
   emit('update', { ...settings.value });
   emit('close');
-  console.log('Paramètres sauvegardés:', settings.value);
 }
 
 function resetToDefaults() {

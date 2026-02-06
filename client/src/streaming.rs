@@ -9,6 +9,7 @@ use crate::protocol::ControlMessage;
 use crate::screen_capture::ScreenCapturer;
 use crate::video_encoder::VideoEncoder;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
@@ -19,7 +20,7 @@ pub struct Streamer {
     encoder: Arc<Mutex<Box<dyn VideoEncoder>>>,
     webrtc: Arc<Mutex<WebRTCConnection>>,
     framerate: u32,
-    running: Arc<Mutex<bool>>,
+    running: Arc<AtomicBool>,
 }
 
 impl Streamer {
@@ -35,7 +36,7 @@ impl Streamer {
             encoder: Arc::new(Mutex::new(encoder)),
             webrtc: Arc::new(Mutex::new(webrtc)),
             framerate,
-            running: Arc::new(Mutex::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -43,8 +44,8 @@ impl Streamer {
     pub async fn start(&self) -> Result<()> {
         info!("Démarrage du streaming vidéo à {} FPS", self.framerate);
 
-        // Marquer comme running
-        *self.running.lock().await = true;
+        // Marquer comme running (AtomicBool = pas de lock)
+        self.running.store(true, Ordering::SeqCst);
 
         // Créer un interval pour le framerate
         let frame_duration = Duration::from_millis(1000 / self.framerate as u64);
@@ -53,7 +54,7 @@ impl Streamer {
         let mut frame_count = 0u64;
         let mut error_count = 0u32;
 
-        while *self.running.lock().await {
+        while self.running.load(Ordering::SeqCst) {
             ticker.tick().await;
 
             // 1. Capturer frame (scope explicite pour libérer le lock immédiatement)
@@ -130,14 +131,14 @@ impl Streamer {
     }
 
     /// Arrêter le streaming
-    pub async fn stop(&self) {
+    pub fn stop(&self) {
         info!("Arrêt du streaming demandé");
-        *self.running.lock().await = false;
+        self.running.store(false, Ordering::SeqCst);
     }
 
     /// Vérifier si le streaming est actif
-    pub async fn is_running(&self) -> bool {
-        *self.running.lock().await
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 }
 
@@ -205,10 +206,17 @@ pub struct InputHandler {
 }
 
 impl InputHandler {
-    /// Créer un nouveau InputHandler
+    /// Créer un nouveau InputHandler avec résolution par défaut
     pub fn new() -> Result<Self> {
         Ok(Self {
             controller: Arc::new(Mutex::new(InputController::new()?)),
+        })
+    }
+
+    /// Créer un nouveau InputHandler avec une résolution spécifique
+    pub fn new_with_resolution(width: i32, height: i32) -> Result<Self> {
+        Ok(Self {
+            controller: Arc::new(Mutex::new(InputController::new_with_resolution(width, height)?)),
         })
     }
 
@@ -291,8 +299,6 @@ impl InputHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     async fn test_streamer_creation() {
         // Test basique de création

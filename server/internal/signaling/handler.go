@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/heiphaistos44-crypto/GhostHandDesk/server/internal/config"
 	"github.com/heiphaistos44-crypto/GhostHandDesk/server/internal/models"
 )
 
@@ -17,41 +18,33 @@ const (
 	WriteBufferSize = 4096
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  ReadBufferSize,
-	WriteBufferSize: WriteBufferSize,
-	// Limite de taille de message : 10 MB pour supporter les frames vidéo
-	// mais empêcher les attaques DoS avec messages géants
-	Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
-		log.Printf("[WS] Erreur WebSocket: %v", reason)
-		http.Error(w, reason.Error(), status)
-	},
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
+// newUpgrader crée un websocket.Upgrader avec les origines autorisées
+func newUpgrader(allowedOrigins []string) websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  ReadBufferSize,
+		WriteBufferSize: WriteBufferSize,
+		Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
+			log.Printf("[WS] Erreur WebSocket: %v", reason)
+			http.Error(w, reason.Error(), status)
+		},
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
 
-		// Liste blanche d'origines autorisées
-		allowedOrigins := []string{
-			"http://localhost:9000",
-			"http://127.0.0.1:9000",
-			"http://localhost:1420",  // Port dev Tauri
-			"http://127.0.0.1:1420",
-			"tauri://localhost",      // Origine Tauri en production
-		}
-
-		// Vérifier si l'origine est dans la whitelist
-		for _, allowed := range allowedOrigins {
-			if origin == allowed {
-				return true
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					return true
+				}
 			}
-		}
 
-		log.Printf("[WS] Origine refusée: %s", origin)
-		return false
-	},
+			log.Printf("[WS] Origine refusée: %s", origin)
+			return false
+		},
+	}
 }
 
 // HandleWebSocket gère les connexions WebSocket
-func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
+func HandleWebSocket(hub *Hub, cfg *config.Config, w http.ResponseWriter, r *http.Request) {
+	upgrader := newUpgrader(cfg.AllowedOrigins)
 	// Mettre à niveau la connexion HTTP vers WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -79,7 +72,12 @@ func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extraire l'ID du dispositif
-	data, _ := json.Marshal(registerMsg.Data)
+	data, err := json.Marshal(registerMsg.Data)
+	if err != nil {
+		log.Printf("[HANDLER] Erreur marshal RegisterMessage data: %v", err)
+		conn.Close()
+		return
+	}
 	var regData models.RegisterMessage
 	if err := json.Unmarshal(data, &regData); err != nil {
 		log.Printf("[HANDLER] Erreur parsing RegisterMessage: %v", err)
@@ -118,8 +116,16 @@ func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			"message": "Enregistrement réussi",
 		},
 	}
-	confirmData, _ := json.Marshal(confirmMsg)
-	client.Send <- confirmData
+	confirmData, err := json.Marshal(confirmMsg)
+	if err != nil {
+		log.Printf("[HANDLER] Erreur marshal confirmation: %v", err)
+		return
+	}
+	select {
+	case client.Send <- confirmData:
+	default:
+		log.Printf("[HANDLER] Canal saturé pour %s, confirmation non envoyée", deviceID)
+	}
 
 	// Démarrer les goroutines de lecture et d'écriture
 	go client.WritePump()

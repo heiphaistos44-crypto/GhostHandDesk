@@ -91,27 +91,32 @@ impl CryptoManager {
         Ok(plaintext.to_vec())
     }
 
-    /// Generate a password hash for authentication
+    /// Generate a password hash for authentication using PBKDF2-HMAC-SHA256
+    ///
+    /// Utilise ring::pbkdf2 avec 100_000 itérations (recommandation OWASP)
+    /// pour résister aux attaques bruteforce.
     pub fn hash_password(&self, password: &str) -> Result<String> {
-        use ring::digest;
-
         let salt = self.generate_nonce()?;
-        let mut to_hash = password.as_bytes().to_vec();
-        to_hash.extend_from_slice(&salt);
 
-        let hash = digest::digest(&digest::SHA256, &to_hash);
+        // PBKDF2-HMAC-SHA256 avec 100_000 itérations (OWASP recommendation)
+        let mut hash_output = [0u8; 32]; // SHA256 = 32 bytes
+        ring::pbkdf2::derive(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256,
+            std::num::NonZeroU32::new(100_000).unwrap(),
+            &salt,
+            password.as_bytes(),
+            &mut hash_output,
+        );
 
-        // Combine salt and hash
+        // Combine salt + hash
         let mut result = salt;
-        result.extend_from_slice(hash.as_ref());
+        result.extend_from_slice(&hash_output);
 
         Ok(BASE64_STANDARD.encode(result))
     }
 
-    /// Verify a password against a hash
+    /// Verify a password against a hash (constant-time via ring::pbkdf2)
     pub fn verify_password(&self, password: &str, hash: &str) -> Result<bool> {
-        use ring::digest;
-
         let combined = BASE64_STANDARD
             .decode(hash)
             .map_err(|e| GhostHandError::Crypto(format!("Invalid hash format: {}", e)))?;
@@ -122,13 +127,97 @@ impl CryptoManager {
 
         let (salt, stored_hash) = combined.split_at(NONCE_SIZE);
 
-        let mut to_hash = password.as_bytes().to_vec();
-        to_hash.extend_from_slice(salt);
-
-        let computed_hash = digest::digest(&digest::SHA256, &to_hash);
-
-        Ok(computed_hash.as_ref() == stored_hash)
+        // ring::pbkdf2::verify fait une comparaison en temps constant
+        Ok(ring::pbkdf2::verify(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256,
+            std::num::NonZeroU32::new(100_000).unwrap(),
+            salt,
+            password.as_bytes(),
+            stored_hash,
+        ).is_ok())
     }
+}
+
+/// Challenge-response password verification for P2P connections.
+///
+/// Protocol:
+/// 1. Host stores password_hash = base64(salt + PBKDF2(password, salt))
+/// 2. On connect, host sends challenge (random 32 bytes) + salt (from stored hash)
+/// 3. Client computes: raw_hash = PBKDF2(password, salt), then response = HMAC-SHA256(raw_hash, challenge)
+/// 4. Host computes: expected = HMAC-SHA256(stored_raw_hash, challenge), compares with response
+pub fn compute_challenge_response(password: &str, salt: &[u8], challenge: &[u8]) -> String {
+    use ring::hmac;
+
+    // Step 1: Derive raw hash from password + salt (same as what host stored)
+    let mut raw_hash = [0u8; 32];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        std::num::NonZeroU32::new(100_000).unwrap(),
+        salt,
+        password.as_bytes(),
+        &mut raw_hash,
+    );
+
+    // Step 2: HMAC(raw_hash, challenge) as the response
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &raw_hash);
+    let tag = hmac::sign(&key, challenge);
+
+    BASE64_STANDARD.encode(tag.as_ref())
+}
+
+/// Verify a challenge response on the host side.
+///
+/// Arguments:
+/// - stored_password_hash: base64(salt + PBKDF2(password, salt)) as stored locally
+/// - challenge: the random nonce that was sent to the client
+/// - response: the base64-encoded HMAC response from the client
+pub fn verify_challenge_response(
+    stored_password_hash: &str,
+    challenge: &[u8],
+    response: &str,
+) -> crate::error::Result<bool> {
+    use ring::hmac;
+
+    let combined = BASE64_STANDARD.decode(stored_password_hash)
+        .map_err(|e| GhostHandError::Crypto(format!("Invalid stored hash: {}", e)))?;
+
+    if combined.len() < NONCE_SIZE + 32 {
+        return Ok(false);
+    }
+
+    // Extract stored raw hash (skip the salt prefix)
+    let stored_raw_hash = &combined[NONCE_SIZE..];
+
+    // Compute expected HMAC
+    let key = hmac::Key::new(hmac::HMAC_SHA256, stored_raw_hash);
+
+    let response_bytes = BASE64_STANDARD.decode(response)
+        .map_err(|e| GhostHandError::Crypto(format!("Invalid response format: {}", e)))?;
+
+    // Constant-time verification
+    Ok(hmac::verify(&key, challenge, &response_bytes).is_ok())
+}
+
+/// Extract the salt from a stored password hash (first NONCE_SIZE bytes of the decoded value)
+pub fn extract_salt_from_hash(stored_password_hash: &str) -> crate::error::Result<Vec<u8>> {
+    let combined = BASE64_STANDARD.decode(stored_password_hash)
+        .map_err(|e| GhostHandError::Crypto(format!("Invalid stored hash: {}", e)))?;
+
+    if combined.len() < NONCE_SIZE {
+        return Err(GhostHandError::Crypto("Stored hash too short".to_string()));
+    }
+
+    Ok(combined[..NONCE_SIZE].to_vec())
+}
+
+/// Generate a random challenge nonce (32 bytes)
+pub fn generate_challenge() -> crate::error::Result<Vec<u8>> {
+    let rng = SystemRandom::new();
+    let mut challenge = vec![0u8; 32];
+    rng.fill(&mut challenge).map_err(|e| {
+        GhostHandError::Crypto(format!("Failed to generate challenge: {:?}", e))
+    })?;
+    Ok(challenge)
 }
 
 /// Encrypted data container
@@ -310,13 +399,41 @@ mod tests {
     }
 
     #[test]
+    fn test_challenge_response() -> Result<()> {
+        let crypto = CryptoManager::new();
+        let password = "test_password_123";
+
+        // Host stores the password hash
+        let stored_hash = crypto.hash_password(password)?;
+
+        // Generate a challenge
+        let challenge = generate_challenge()?;
+        assert_eq!(challenge.len(), 32);
+
+        // Extract salt from stored hash
+        let salt = extract_salt_from_hash(&stored_hash)?;
+
+        // Client computes response
+        let response = compute_challenge_response(password, &salt, &challenge);
+
+        // Host verifies
+        assert!(verify_challenge_response(&stored_hash, &challenge, &response)?);
+
+        // Wrong password should fail
+        let wrong_response = compute_challenge_response("wrong_password", &salt, &challenge);
+        assert!(!verify_challenge_response(&stored_hash, &challenge, &wrong_response)?);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_e2e_encryption_with_key_exchange() -> Result<()> {
         let kex = KeyExchange::new();
         let crypto = CryptoManager::new();
 
         // Simulation d'un échange de clés entre Alice et Bob
-        let (alice_private, alice_public) = kex.generate_keypair()?;
-        let (bob_private, bob_public) = kex.generate_keypair()?;
+        let (alice_private, _alice_public) = kex.generate_keypair()?;
+        let (_bob_private, bob_public) = kex.generate_keypair()?;
 
         // Dériver le secret partagé
         let shared_secret = kex.derive_shared_secret(&alice_private, &bob_public)?;

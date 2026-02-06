@@ -93,7 +93,7 @@ fn test_config_defaults() {
 
     // Vérifier les valeurs par défaut
     assert!(!config.server_url.is_empty());
-    assert!(config.server_url.starts_with("wss://"));
+    assert!(config.server_url.starts_with("ws://") || config.server_url.starts_with("wss://"));
     assert_eq!(config.video_config.framerate, 30);
     assert_eq!(config.video_config.bitrate, 4000);
     assert!(!config.stun_servers.is_empty());

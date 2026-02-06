@@ -168,7 +168,7 @@ impl Storage {
         // Mettre à jour le timestamp
         self.data.last_saved = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         // Créer un backup avant d'écraser
@@ -279,7 +279,7 @@ impl Storage {
     pub fn cleanup_history(&mut self, days_to_keep: u64) {
         let cutoff_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs() - (days_to_keep * 24 * 60 * 60);
         let cutoff_ms = cutoff_timestamp * 1000;
 
