@@ -76,7 +76,7 @@
             <input
               type="text"
               v-model="settings.serverUrl"
-              placeholder="wss://localhost:8443/ws"
+              placeholder="ws://localhost:9000/ws"
             />
           </div>
 
@@ -208,7 +208,7 @@ const settings = ref({
   quality: 80,
 
   // Réseau
-  serverUrl: 'wss://localhost:8443/ws',
+  serverUrl: 'ws://localhost:9000/ws',
   stunServers: [
     'stun:stun.l.google.com:19302',
     'stun:stun1.l.google.com:19302',
@@ -259,7 +259,7 @@ function resetToDefaults() {
       framerate: 30,
       bitrate: 4000,
       quality: 80,
-      serverUrl: 'wss://localhost:8443/ws',
+      serverUrl: 'ws://localhost:9000/ws',
       stunServers: [
         'stun:stun.l.google.com:19302',
         'stun:stun1.l.google.com:19302',

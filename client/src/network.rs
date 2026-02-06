@@ -577,6 +577,9 @@ impl SessionManager {
     pub async fn connect_to_device(&mut self, target_id: String, password: Option<String>) -> Result<()> {
         info!("Connexion à {} demandée", target_id);
 
+        // Sauvegarder le fait qu'un password est fourni avant de le move
+        let password_was_used = password.is_some();
+
         // 1. Envoyer ConnectRequest et attendre ConnectionAccepted
         self.signaling.as_ref().ok_or_else(|| {
             GhostHandError::Network("Not connected to signaling server".to_string())
@@ -781,7 +784,7 @@ impl SessionManager {
             AuditEvent::ConnectionEstablished {
                 peer_id: target_id.clone(),
                 direction: "outgoing".to_string(),
-                password_used: password.is_some(),
+                password_used: Some(password_was_used),
             },
         );
 

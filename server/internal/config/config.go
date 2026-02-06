@@ -38,12 +38,13 @@ func LoadFromEnv() *Config {
 		exeDir, _ = os.Getwd()
 	}
 
-	// Chemins par défaut basés sur l'emplacement de l'exécutable
-	defaultCertFile := filepath.Join(exeDir, "certs", "server.crt")
-	defaultKeyFile := filepath.Join(exeDir, "certs", "server.key")
+	// Chemins optionnels pour HTTPS (non requis pour HTTP simple)
+	// Si vous voulez activer HTTPS, définissez CERT_FILE et KEY_FILE dans l'environnement
+	defaultCertFile := ""
+	defaultKeyFile := ""
 
 	return &Config{
-		Host:              getEnv("SERVER_HOST", ":9080"),
+		Host:              getEnv("SERVER_HOST", ":9000"),
 		CertFile:          getEnv("CERT_FILE", defaultCertFile),
 		KeyFile:           getEnv("KEY_FILE", defaultKeyFile),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),

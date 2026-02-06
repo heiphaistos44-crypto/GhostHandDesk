@@ -56,6 +56,10 @@ echo ✅ ghosthanddesk-tauri.exe copié
 copy "%SERVER_EXE%" "%PORTABLE_DIR%\signaling-server.exe" >nul
 echo ✅ signaling-server.exe copié
 
+:: Créer server_port.txt avec le port par défaut
+echo 9000 > "%PORTABLE_DIR%\server_port.txt"
+echo ✅ server_port.txt créé (port 9000)
+
 :: Créer le dossier certs (vide)
 mkdir "%PORTABLE_DIR%\certs"
 echo ✅ Dossier certs créé (sera rempli auto au démarrage)

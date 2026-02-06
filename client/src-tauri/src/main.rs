@@ -31,7 +31,7 @@ struct AppState {
     session_manager: Arc<Mutex<Option<SessionManager>>>,
     config: Arc<Mutex<Config>>,
     pending_requests: Arc<Mutex<Vec<ConnectionRequest>>>,
-    streamer_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    streamer_handle: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 // Note: Le serveur de signalement doit être lancé MANUELLEMENT en externe
@@ -149,7 +149,7 @@ fn set_peer_favorite(peer_id: String, favorite: bool) -> Result<(), String> {
 
 /// Obtenir les statistiques du storage
 #[tauri::command]
-fn get_storage_stats() -> Result<ghost_hand_client::storage::StorageStats, String> {
+async fn get_storage_stats() -> Result<ghost_hand_client::storage::StorageStats, String> {
     if let Some(storage_mutex) = global_storage() {
         if let Ok(storage) = storage_mutex.lock() {
             Ok(storage.get_stats())
@@ -638,8 +638,9 @@ async fn start_listening_for_requests(
                                 };
 
                                 // Nettoyer les vieilles requêtes avant d'ajouter la nouvelle
-                                cleanup_old_requests(&mut pending_requests.lock().await);
-                                pending_requests.lock().await.push(request.clone());
+                                let mut requests_guard = pending_requests.lock().await;
+                                cleanup_old_requests(&mut *requests_guard);
+                                requests_guard.push(request.clone());
 
                                 // Émettre un event vers l'UI
                                 if let Err(e) = window.emit("connection-request", request) {

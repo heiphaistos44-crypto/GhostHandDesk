@@ -305,7 +305,7 @@ impl Storage {
 }
 
 /// Statistiques sur le storage
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStats {
     pub total_connections: usize,
     pub known_peers: usize,
