@@ -156,6 +156,11 @@ interface VideoFramePayload {
   timestamp: number;
 }
 
+// Constantes de sécurité pour la validation des frames
+const MAX_FRAME_WIDTH = 3840;  // 4K
+const MAX_FRAME_HEIGHT = 2160; // 4K
+const MAX_FRAME_DATA_SIZE = 10 * 1024 * 1024; // 10 MB
+
 // Méthodes
 function handleVideoFrame(payload: VideoFramePayload) {
   const canvas = canvasRef.value;
@@ -164,35 +169,82 @@ function handleVideoFrame(payload: VideoFramePayload) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Ajuster taille canvas si nécessaire
+  // SÉCURITÉ : Valider les dimensions de la frame
+  if (!payload.width || !payload.height ||
+      payload.width <= 0 || payload.height <= 0 ||
+      payload.width > MAX_FRAME_WIDTH || payload.height > MAX_FRAME_HEIGHT) {
+    console.error(
+      `[SÉCURITÉ] Dimensions de frame invalides ou dangereuses: ${payload.width}x${payload.height}. ` +
+      `Limites: ${MAX_FRAME_WIDTH}x${MAX_FRAME_HEIGHT}`
+    );
+    return;
+  }
+
+  // SÉCURITÉ : Valider la taille des données
+  if (!payload.data || payload.data.length === 0 || payload.data.length > MAX_FRAME_DATA_SIZE) {
+    console.error(
+      `[SÉCURITÉ] Taille de données invalide: ${payload.data?.length || 0} bytes. ` +
+      `Limite: ${MAX_FRAME_DATA_SIZE} bytes`
+    );
+    return;
+  }
+
+  // SÉCURITÉ : Vérifier que les données sont des nombres valides
+  if (!Array.isArray(payload.data)) {
+    console.error('[SÉCURITÉ] Format de données invalide: attendu Array');
+    return;
+  }
+
+  // Ajuster taille canvas si nécessaire (dimensions déjà validées)
   if (canvas.width !== payload.width || canvas.height !== payload.height) {
     canvas.width = payload.width;
     canvas.height = payload.height;
   }
 
-  // Créer ImageData et dessiner
+  // Décoder et dessiner selon le format
   try {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(payload.data),
-      payload.width,
-      payload.height
-    );
+    // Les données sont encodées en JPEG - créer un Blob et une Image
+    const blob = new Blob([new Uint8Array(payload.data)], { type: 'image/jpeg' });
+    const url = URL.createObjectURL(blob);
 
-    ctx.putImageData(imageData, 0, 0);
+    const img = new Image();
+    img.onload = () => {
+      // SÉCURITÉ : Vérifier que l'image décodée a les bonnes dimensions
+      if (img.width !== payload.width || img.height !== payload.height) {
+        console.warn(
+          `[SÉCURITÉ] Dimensions image décodée différentes: ` +
+          `attendu ${payload.width}x${payload.height}, ` +
+          `obtenu ${img.width}x${img.height}`
+        );
+      }
 
-    // Marquer comme streaming
-    if (!streaming.value) {
-      streaming.value = true;
-    }
+      // Dessiner l'image sur le canvas (dimensions validées)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Compter frame
-    frameCount++;
+      // Libérer la mémoire
+      URL.revokeObjectURL(url);
 
-    // Calculer latence
-    const now = Date.now();
-    latency.value = Math.max(0, now - payload.timestamp);
+      // Marquer comme streaming
+      if (!streaming.value) {
+        streaming.value = true;
+      }
+
+      // Compter frame
+      frameCount++;
+
+      // Calculer latence
+      const now = Date.now();
+      latency.value = Math.max(0, now - payload.timestamp);
+    };
+
+    img.onerror = (err) => {
+      console.error('[SÉCURITÉ] Erreur chargement image (format invalide ou corrompu):', err);
+      URL.revokeObjectURL(url);
+    };
+
+    img.src = url;
   } catch (error) {
-    console.error('Erreur dessin frame:', error);
+    console.error('[SÉCURITÉ] Erreur traitement frame:', error);
   }
 }
 
@@ -542,8 +594,8 @@ function updateQuality() {
 }
 
 .stream-canvas {
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   cursor: crosshair;
 }

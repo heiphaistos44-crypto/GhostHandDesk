@@ -235,33 +235,57 @@ impl VideoEncoder for FFmpegEncoder {
         use ffmpeg_next as ffmpeg;
         use ffmpeg::format::Pixel;
         use ffmpeg::util::frame::video::Video as AVFrame;
+        use crate::screen_capture::FrameFormat;
 
-        // 1. Créer AVFrame source (RGBA)
+        // 1. Convertir en RGBA si nécessaire
+        let rgba_data = match frame.format {
+            FrameFormat::RGBA => frame.data.clone(),
+            FrameFormat::BGRA => {
+                // Convertir BGRA → RGBA (swap R et B)
+                frame.data.chunks_exact(4)
+                    .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]])
+                    .collect()
+            }
+            FrameFormat::RGB => {
+                // Convertir RGB → RGBA (ajouter canal alpha)
+                frame.data.chunks_exact(3)
+                    .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+                    .collect()
+            }
+            FrameFormat::BGR => {
+                // Convertir BGR → RGBA (swap R et B, ajouter alpha)
+                frame.data.chunks_exact(3)
+                    .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255])
+                    .collect()
+            }
+        };
+
+        // 2. Créer AVFrame source (RGBA)
         let mut src_frame = AVFrame::new(Pixel::RGBA, frame.width, frame.height);
 
-        // Copier les données de la frame
+        // Copier les données converties
         let src_data = src_frame.data_mut(0);
-        let copy_len = std::cmp::min(src_data.len(), frame.data.len());
-        src_data[..copy_len].copy_from_slice(&frame.data[..copy_len]);
+        let copy_len = std::cmp::min(src_data.len(), rgba_data.len());
+        src_data[..copy_len].copy_from_slice(&rgba_data[..copy_len]);
 
-        // 2. Créer AVFrame destination (YUV420P)
+        // 3. Créer AVFrame destination (YUV420P)
         let mut yuv_frame = AVFrame::new(Pixel::YUV420P, self.info.width, self.info.height);
 
-        // 3. Scaler RGBA → YUV420P
+        // 4. Scaler RGBA → YUV420P
         self.scaler
             .run(&src_frame, &mut yuv_frame)
             .map_err(|e| GhostHandError::VideoEncoding(format!("Erreur de scaling: {}", e)))?;
 
-        // 4. Définir PTS (Presentation Timestamp)
+        // 5. Définir PTS (Presentation Timestamp)
         yuv_frame.set_pts(Some(self.frame_number));
         self.frame_number += 1;
 
-        // 5. Envoyer la frame à l'encodeur
+        // 6. Envoyer la frame à l'encodeur
         self.encoder
             .send_frame(&yuv_frame)
             .map_err(|e| GhostHandError::VideoEncoding(format!("Erreur d'envoi de frame: {}", e)))?;
 
-        // 6. Recevoir les packets encodés
+        // 7. Recevoir les packets encodés
         let mut encoded_data = Vec::new();
         let mut is_keyframe = false;
 
@@ -273,9 +297,9 @@ impl VideoEncoder for FFmpegEncoder {
             is_keyframe = packet.is_key();
         }
 
-        // Si pas de données, retourner une frame vide
+        // Si pas de données, retourner une erreur
         if encoded_data.is_empty() {
-            encoded_data = vec![0u8; 100]; // Placeholder minimal
+            return Err(GhostHandError::VideoEncoding("Aucune donnée encodée disponible après encoding".into()));
         }
 
         Ok(EncodedFrame {
@@ -294,11 +318,11 @@ impl VideoEncoder for FFmpegEncoder {
 
 /// Create encoder based on configuration
 pub fn create_encoder(
-    codec: VideoCodec,
+    _codec: VideoCodec,
     width: u32,
     height: u32,
     framerate: u32,
-    bitrate: u32,
+    _bitrate: u32,
 ) -> Result<Box<dyn VideoEncoder>> {
     #[cfg(feature = "ffmpeg")]
     {

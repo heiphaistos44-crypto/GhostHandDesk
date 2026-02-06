@@ -3,7 +3,7 @@ use base64::prelude::*;
 use ring::aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
 
 const NONCE_SIZE: usize = 12;
 const KEY_SIZE: usize = 32;
@@ -164,42 +164,77 @@ impl NonceSequence for SingleNonce {
     }
 }
 
-/// Key exchange using simplified Diffie-Hellman
-/// In production, use proper ECDH with curve25519
+/// Key exchange using X25519 ECDH (Elliptic Curve Diffie-Hellman)
 pub struct KeyExchange {
-    crypto: CryptoManager,
+    rng: SystemRandom,
 }
 
 impl KeyExchange {
     pub fn new() -> Self {
         Self {
-            crypto: CryptoManager::new(),
+            rng: SystemRandom::new(),
         }
     }
 
-    /// Generate a key pair for key exchange
+    /// Generate a key pair for key exchange using X25519
+    /// Returns (private_key_bytes, public_key_bytes)
     pub fn generate_keypair(&self) -> Result<(Vec<u8>, Vec<u8>)> {
-        // This is a simplified version
-        // In production, use ring::agreement or x25519_dalek
+        // Générer 32 bytes aléatoires pour la clé privée
+        let mut private_key_bytes = [0u8; 32];
+        self.rng.fill(&mut private_key_bytes)
+            .map_err(|e| GhostHandError::Crypto(format!("Failed to generate random bytes: {:?}", e)))?;
 
-        let private_key = self.crypto.generate_key()?;
-        let public_key = self.crypto.generate_key()?; // Simplified
+        // Créer la clé privée X25519 à partir des bytes
+        let private_key = StaticSecret::from(private_key_bytes);
 
-        Ok((private_key, public_key))
+        // Calculer la clé publique correspondante
+        let public_key = X25519PublicKey::from(&private_key);
+
+        Ok((private_key_bytes.to_vec(), public_key.as_bytes().to_vec()))
     }
 
-    /// Derive shared secret from private key and peer's public key
+    /// Derive shared secret from private key and peer's public key using X25519 ECDH
+    ///
+    /// # Arguments
+    /// * `private_key` - Notre clé privée (32 bytes)
+    /// * `peer_public_key` - La clé publique du pair (32 bytes)
+    ///
+    /// # Returns
+    /// Le secret partagé dérivé (32 bytes) qui peut être utilisé comme clé de chiffrement
     pub fn derive_shared_secret(
         &self,
-        _private_key: &[u8],
-        _peer_public_key: &[u8],
+        private_key: &[u8],
+        peer_public_key: &[u8],
     ) -> Result<Vec<u8>> {
-        // This is a placeholder
-        // In production, use proper ECDH
-        // let agreement = ring::agreement::agree_ephemeral(...)?;
+        if private_key.len() != 32 {
+            return Err(GhostHandError::Crypto(format!(
+                "Invalid private key length: expected 32, got {}",
+                private_key.len()
+            )));
+        }
 
-        // For now, just generate a random key
-        self.crypto.generate_key()
+        if peer_public_key.len() != 32 {
+            return Err(GhostHandError::Crypto(format!(
+                "Invalid public key length: expected 32, got {}",
+                peer_public_key.len()
+            )));
+        }
+
+        // Reconstruire notre clé privée à partir des bytes
+        let mut private_key_array = [0u8; 32];
+        private_key_array.copy_from_slice(private_key);
+        let my_private_key = StaticSecret::from(private_key_array);
+
+        // Reconstruire la clé publique du pair à partir des bytes
+        let mut peer_public_key_array = [0u8; 32];
+        peer_public_key_array.copy_from_slice(peer_public_key);
+        let peer_public = X25519PublicKey::from(peer_public_key_array);
+
+        // Effectuer l'échange de clés ECDH pour obtenir le secret partagé
+        let shared_secret = my_private_key.diffie_hellman(&peer_public);
+
+        // Le secret partagé est de 32 bytes, parfait pour AES-256
+        Ok(shared_secret.as_bytes().to_vec())
     }
 }
 
@@ -243,6 +278,57 @@ mod tests {
         assert_eq!(key1.len(), KEY_SIZE);
         assert_eq!(key2.len(), KEY_SIZE);
         assert_ne!(key1, key2); // Should be different
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_key_exchange_ecdh() -> Result<()> {
+        let kex = KeyExchange::new();
+
+        // Alice génère sa paire de clés
+        let (alice_private, alice_public) = kex.generate_keypair()?;
+        assert_eq!(alice_private.len(), 32);
+        assert_eq!(alice_public.len(), 32);
+
+        // Bob génère sa paire de clés
+        let (bob_private, bob_public) = kex.generate_keypair()?;
+        assert_eq!(bob_private.len(), 32);
+        assert_eq!(bob_public.len(), 32);
+
+        // Alice calcule le secret partagé avec sa clé privée + la clé publique de Bob
+        let alice_shared = kex.derive_shared_secret(&alice_private, &bob_public)?;
+
+        // Bob calcule le secret partagé avec sa clé privée + la clé publique d'Alice
+        let bob_shared = kex.derive_shared_secret(&bob_private, &alice_public)?;
+
+        // Les deux secrets partagés doivent être identiques
+        assert_eq!(alice_shared, bob_shared);
+        assert_eq!(alice_shared.len(), 32); // 32 bytes pour AES-256
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_e2e_encryption_with_key_exchange() -> Result<()> {
+        let kex = KeyExchange::new();
+        let crypto = CryptoManager::new();
+
+        // Simulation d'un échange de clés entre Alice et Bob
+        let (alice_private, alice_public) = kex.generate_keypair()?;
+        let (bob_private, bob_public) = kex.generate_keypair()?;
+
+        // Dériver le secret partagé
+        let shared_secret = kex.derive_shared_secret(&alice_private, &bob_public)?;
+
+        // Alice chiffre un message avec le secret partagé
+        let plaintext = b"Message secret d'Alice a Bob";
+        let encrypted = crypto.encrypt(&shared_secret, plaintext)?;
+
+        // Bob déchiffre le message avec le même secret partagé
+        let decrypted = crypto.decrypt(&shared_secret, &encrypted)?;
+
+        assert_eq!(plaintext.as_slice(), decrypted.as_slice());
 
         Ok(())
     }

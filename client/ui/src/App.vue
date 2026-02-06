@@ -58,15 +58,32 @@
       @close="settingsOpen = false"
       @update="handleSettingsUpdate"
     />
+
+    <!-- Connection Request Dialog (popup demande entrante) -->
+    <ConnectionRequestDialog
+      :visible="connectionRequestVisible"
+      :request-from="pendingRequest.from"
+      :timestamp="pendingRequest.timestamp"
+      @accept="handleAcceptRequest"
+      @reject="handleRejectRequest"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import ConnectDialog from './components/ConnectDialog.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
+import ConnectionRequestDialog from './components/ConnectionRequestDialog.vue';
+
+// Types
+interface ConnectionRequest {
+  from: string;
+  timestamp: number;
+}
 
 // États réactifs
 const deviceId = ref<string>('');
@@ -76,6 +93,13 @@ const connectedTo = ref<string>('');
 const connectionError = ref<string>('');
 const settingsOpen = ref(false);
 const showSettings = ref(true);
+
+// États pour la popup de demande de connexion
+const connectionRequestVisible = ref(false);
+const pendingRequest = ref<ConnectionRequest>({
+  from: '',
+  timestamp: 0
+});
 
 // Computed properties
 const statusClass = computed(() => {
@@ -96,9 +120,25 @@ onMounted(async () => {
     // Récupérer le Device ID depuis le backend Rust
     deviceId.value = await invoke<string>('get_device_id');
     console.log('Device ID:', deviceId.value);
+
+    // Initialiser la session au démarrage
+    await invoke('initialize_session');
+    console.log('Session initialisée');
+
+    // Démarrer l'écoute des demandes de connexion entrantes
+    await invoke('start_listening_for_requests');
+    console.log('Écoute des demandes démarrée');
+
+    // Écouter les events de demande de connexion
+    await listen<ConnectionRequest>('connection-request', (event) => {
+      console.log('Demande de connexion reçue:', event.payload);
+      pendingRequest.value = event.payload;
+      connectionRequestVisible.value = true;
+    });
+
   } catch (error) {
-    console.error('Erreur récupération Device ID:', error);
-    connectionError.value = 'Impossible de récupérer le Device ID';
+    console.error('Erreur initialisation:', error);
+    connectionError.value = 'Impossible d\'initialiser l\'application';
   }
 });
 
@@ -118,12 +158,69 @@ async function handleConnect(targetId: string, password: string | null) {
     connected.value = true;
     connectedTo.value = targetId;
     console.log('Connexion établie !');
+
+    // Auto-démarrer la réception vidéo
+    try {
+      await invoke('start_receiving');
+      console.log('Réception vidéo démarrée');
+    } catch (error) {
+      console.error('Erreur démarrage réception:', error);
+    }
+
   } catch (error: any) {
     console.error('Erreur de connexion:', error);
     connectionError.value = error.message || 'Échec de la connexion';
     connected.value = false;
   } finally {
     connecting.value = false;
+  }
+}
+
+async function handleAcceptRequest() {
+  connectionRequestVisible.value = false;
+
+  try {
+    console.log('Acceptation de la connexion de:', pendingRequest.value.from);
+
+    await invoke('accept_connection', {
+      from: pendingRequest.value.from
+    });
+
+    connected.value = true;
+    connectedTo.value = pendingRequest.value.from;
+    console.log('Connexion acceptée et établie !');
+
+    // Auto-démarrer le streaming et l'input handler
+    try {
+      await invoke('start_streaming');
+      console.log('Streaming démarré');
+
+      await invoke('start_input_handler');
+      console.log('Input handler démarré');
+    } catch (error) {
+      console.error('Erreur démarrage streaming/input:', error);
+    }
+
+  } catch (error: any) {
+    console.error('Erreur acceptation connexion:', error);
+    connectionError.value = error.message || 'Échec de l\'acceptation';
+  }
+}
+
+async function handleRejectRequest() {
+  connectionRequestVisible.value = false;
+
+  try {
+    console.log('Rejet de la connexion de:', pendingRequest.value.from);
+
+    await invoke('reject_connection', {
+      from: pendingRequest.value.from,
+      reason: 'Refusé par l\'utilisateur'
+    });
+
+    console.log('Connexion rejetée');
+  } catch (error) {
+    console.error('Erreur rejet connexion:', error);
   }
 }
 

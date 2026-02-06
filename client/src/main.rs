@@ -3,6 +3,7 @@ mod crypto;
 mod error;
 mod input_control;
 mod network;
+mod protocol;
 mod screen_capture;
 mod streaming;
 mod ui;

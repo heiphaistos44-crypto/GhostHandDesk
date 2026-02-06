@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.ghosthanddesk.app",
   "build": {
-    "beforeDevCommand": "cd ../ui && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "cd ../ui && npm run build",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../ui/dist"
   },
   "bundle": {
@@ -33,6 +33,7 @@
       "signingIdentity": null
     },
     "externalBin": [],
+    "resources": [],
     "copyright": "",
     "category": "DeveloperTool",
     "shortDescription": "Bureau à distance avec WebRTC",

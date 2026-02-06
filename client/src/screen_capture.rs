@@ -1,11 +1,8 @@
 use crate::error::{GhostHandError, Result};
-use image::{ImageBuffer, RgbaImage};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Screen capture interface
-pub trait ScreenCapturer {
+pub trait ScreenCapturer: Send {
     /// Capture the current screen frame
     fn capture(&mut self) -> Result<Frame>;
 
@@ -55,6 +52,9 @@ pub struct XCapCapturer {
     current_monitor: Option<usize>,
     frame_count: u64,
 }
+
+// SAFETY: xcap::Monitor is safe to send between threads as it only contains metadata
+unsafe impl Send for XCapCapturer {}
 
 impl XCapCapturer {
     pub fn new() -> Result<Self> {
@@ -108,12 +108,18 @@ impl ScreenCapturer for XCapCapturer {
 
         self.frame_count += 1;
 
+        // Utiliser un timestamp réel en millisecondes
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
         Ok(Frame {
             width,
             height,
             data,
             format: FrameFormat::RGBA,
-            timestamp: self.frame_count,
+            timestamp,
         })
     }
 
@@ -161,105 +167,9 @@ impl ScreenCapturer for XCapCapturer {
     }
 }
 
-/// Alternative capturer using scrap for more control
-#[cfg(feature = "scrap_capturer")]
-pub struct ScrapCapturer {
-    capturer: scrap::Capturer,
-    width: u32,
-    height: u32,
-    frame_count: u64,
-}
-
-#[cfg(feature = "scrap_capturer")]
-impl ScrapCapturer {
-    pub fn new() -> Result<Self> {
-        let display = scrap::Display::primary().map_err(|e| {
-            GhostHandError::ScreenCapture(format!("Failed to get primary display: {}", e))
-        })?;
-
-        let capturer = scrap::Capturer::new(display).map_err(|e| {
-            GhostHandError::ScreenCapture(format!("Failed to create capturer: {}", e))
-        })?;
-
-        let width = capturer.width() as u32;
-        let height = capturer.height() as u32;
-
-        Ok(Self {
-            capturer,
-            width,
-            height,
-            frame_count: 0,
-        })
-    }
-}
-
-#[cfg(feature = "scrap_capturer")]
-impl ScreenCapturer for ScrapCapturer {
-    fn capture(&mut self) -> Result<Frame> {
-        // Scrap is synchronous
-        let frame = loop {
-            match self.capturer.frame() {
-                Ok(buffer) => break buffer.to_vec(),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Frame not ready yet, retry
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
-                }
-                Err(e) => {
-                    return Err(GhostHandError::ScreenCapture(format!(
-                        "Capture failed: {}",
-                        e
-                    )))
-                }
-            }
-        };
-
-        self.frame_count += 1;
-
-        Ok(Frame {
-            width: self.width,
-            height: self.height,
-            data: frame,
-            format: FrameFormat::BGRA, // scrap uses BGRA on most platforms
-            timestamp: self.frame_count,
-        })
-    }
-
-    fn get_displays(&self) -> Result<Vec<Display>> {
-        // scrap doesn't provide multi-monitor support easily
-        Ok(vec![Display {
-            id: 0,
-            name: "Primary Display".to_string(),
-            width: self.width,
-            height: self.height,
-            x: 0,
-            y: 0,
-            is_primary: true,
-        }])
-    }
-
-    fn select_display(&mut self, _display_id: u32) -> Result<()> {
-        // Not implemented for scrap
-        warn!("Display selection not supported with scrap capturer");
-        Ok(())
-    }
-
-    fn get_resolution(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
 /// Factory to create the appropriate capturer for the platform
 pub fn create_capturer() -> Result<Box<dyn ScreenCapturer>> {
-    #[cfg(not(feature = "scrap_capturer"))]
-    {
-        Ok(Box::new(XCapCapturer::new()?))
-    }
-
-    #[cfg(feature = "scrap_capturer")]
-    {
-        Ok(Box::new(ScrapCapturer::new()?))
-    }
+    Ok(Box::new(XCapCapturer::new()?))
 }
 
 #[cfg(test)]

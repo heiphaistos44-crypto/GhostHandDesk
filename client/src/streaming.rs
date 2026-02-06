@@ -2,9 +2,10 @@
 //!
 //! Ce module gère la boucle de capture, encodage et transmission vidéo.
 
-use crate::config::Config;
-use crate::error::Result;
+use crate::error::{GhostHandError, Result};
+use crate::input_control::{InputController, MouseButton, MouseEvent as InputMouseEvent, KeyboardEvent as InputKeyboardEvent, KeyModifiers};
 use crate::network::WebRTCConnection;
+use crate::protocol::ControlMessage;
 use crate::screen_capture::ScreenCapturer;
 use crate::video_encoder::VideoEncoder;
 use std::sync::Arc;
@@ -55,39 +56,63 @@ impl Streamer {
         while *self.running.lock().await {
             ticker.tick().await;
 
-            // 1. Capturer frame
-            let frame = match self.capturer.lock().await.capture() {
-                Ok(f) => f,
-                Err(e) => {
-                    error_count += 1;
-                    if error_count < 5 {
-                        warn!("Erreur de capture ({}): {}", error_count, e);
+            // 1. Capturer frame (scope explicite pour libérer le lock immédiatement)
+            let frame = {
+                let mut capturer_guard = self.capturer.lock().await;
+                match capturer_guard.capture() {
+                    Ok(f) => {
+                        // Reset error count sur succès
+                        error_count = 0;
+                        f
+                    },
+                    Err(e) => {
+                        error_count += 1;
+                        if error_count >= 5 {
+                            error!("Trop d'erreurs de capture consécutives ({}), arrêt du streaming", error_count);
+                            return Err(GhostHandError::ScreenCapture(format!(
+                                "Échec après {} erreurs consécutives de capture", error_count
+                            )));
+                        }
+                        warn!("Erreur de capture ({}/5): {}", error_count, e);
                         continue;
-                    } else {
-                        error!("Trop d'erreurs de capture, arrêt du streaming");
-                        break;
                     }
                 }
-            };
+            }; // capturer_guard est drop ici
 
-            // Reset error count on success
-            if error_count > 0 {
-                error_count = 0;
-            }
-
-            // 2. Encoder frame
-            let encoded = match self.encoder.lock().await.encode(&frame).await {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Erreur d'encodage: {}", e);
-                    continue;
+            // 2. Encoder frame (scope explicite pour libérer le lock immédiatement)
+            let encoded = {
+                let mut encoder_guard = self.encoder.lock().await;
+                match encoder_guard.encode(&frame).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("Erreur d'encodage: {}", e);
+                        continue;
+                    }
                 }
+            }; // encoder_guard est drop ici
+
+            // 3. Créer le message ControlMessage
+            let message = ControlMessage::VideoFrame {
+                data: encoded.data,
+                width: encoded.width,
+                height: encoded.height,
+                timestamp: encoded.timestamp,
+                format: "jpeg".to_string(), // ou "h264" selon l'encoder
             };
 
-            // 3. Envoyer via WebRTC
-            if let Err(e) = self.webrtc.lock().await.send_data(&encoded.data).await {
-                warn!("Erreur d'envoi WebRTC: {}", e);
-                // Ne pas arrêter, juste logger
+            // 4. Envoyer via WebRTC (scope explicite)
+            match message.to_bytes() {
+                Ok(bytes) => {
+                    let webrtc_guard = self.webrtc.lock().await;
+                    if let Err(e) = webrtc_guard.send_data(&bytes).await {
+                        warn!("Erreur d'envoi WebRTC: {}", e);
+                        // Ne pas arrêter, juste logger
+                    }
+                    // webrtc_guard est drop ici automatiquement
+                }
+                Err(e) => {
+                    warn!("Erreur de sérialisation du message: {}", e);
+                }
             }
 
             frame_count += 1;
@@ -119,7 +144,6 @@ impl Streamer {
 /// Receiver : réception et décodage vidéo
 pub struct Receiver {
     webrtc: Arc<Mutex<WebRTCConnection>>,
-    frame_callback: Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>,
 }
 
 impl Receiver {
@@ -127,31 +151,140 @@ impl Receiver {
     pub fn new(webrtc: WebRTCConnection) -> Self {
         Self {
             webrtc: Arc::new(Mutex::new(webrtc)),
-            frame_callback: None,
         }
     }
 
-    /// Configurer le callback pour les frames reçues
-    pub fn on_frame<F>(&mut self, callback: F)
+    /// Démarrer la réception avec un callback pour les frames
+    pub async fn start<F>(self: Arc<Self>, frame_callback: F) -> Result<()>
     where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
+        F: Fn(Vec<u8>, u32, u32, u64) + Send + Sync + 'static,
     {
-        self.frame_callback = Some(Box::new(callback));
-    }
-
-    /// Démarrer la réception
-    pub async fn start(self: Arc<Self>) -> Result<()> {
         info!("Démarrage de la réception vidéo");
 
-        // Setup data channel callback
-        if self.frame_callback.is_none() {
-            warn!("Aucun callback configuré pour les frames");
-            return Ok(());
-        }
+        // Créer un canal mpsc pour éviter les "lost wakeups"
+        // Le callback WebRTC envoie les données dans le canal,
+        // et une task async les traite séparément
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
-        // Note: Pour l'instant, on configure juste le receiver
-        // L'implémentation complète nécessite de refactorer on_data_channel_message
+        let webrtc = self.webrtc.lock().await;
+
+        // Setup callback pour recevoir les messages du data channel
+        // Le callback envoie juste les données brutes dans le canal
+        webrtc.on_data_channel_message(move |data: &[u8]| {
+            let _ = tx.send(data.to_vec());
+        }).await?;
+
         info!("Réception vidéo configurée");
+
+        // Spawner une task pour traiter les messages du canal
+        let callback = Arc::new(frame_callback);
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                // Parse le message
+                if let Ok(msg) = ControlMessage::from_bytes(&data) {
+                    match msg {
+                        ControlMessage::VideoFrame { data, width, height, timestamp, .. } => {
+                            // Appeler le callback avec les données de la frame
+                            callback(data, width, height, timestamp);
+                        }
+                        _ => {
+                            debug!("Message non-vidéo reçu: {:?}", msg);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+}
+
+/// InputHandler : gestion des commandes input reçues
+pub struct InputHandler {
+    controller: Arc<Mutex<InputController>>,
+}
+
+impl InputHandler {
+    /// Créer un nouveau InputHandler
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            controller: Arc::new(Mutex::new(InputController::new()?)),
+        })
+    }
+
+    /// Traiter un message de contrôle reçu
+    pub async fn handle_message(&self, msg: ControlMessage) -> Result<()> {
+        match msg {
+            ControlMessage::MouseMove { x, y } => {
+                self.controller.lock().await.handle_mouse_event(InputMouseEvent::Move { x, y })?;
+            }
+            ControlMessage::MouseClick { button, pressed } => {
+                let btn = match button.as_str() {
+                    "left" => MouseButton::Left,
+                    "right" => MouseButton::Right,
+                    "middle" => MouseButton::Middle,
+                    _ => return Ok(()), // Ignorer les boutons inconnus
+                };
+                if pressed {
+                    self.controller.lock().await.handle_mouse_event(InputMouseEvent::Press { button: btn })?;
+                } else {
+                    self.controller.lock().await.handle_mouse_event(InputMouseEvent::Release { button: btn })?;
+                }
+            }
+            ControlMessage::MouseScroll { delta } => {
+                self.controller.lock().await.handle_mouse_event(InputMouseEvent::Scroll {
+                    delta_x: 0,
+                    delta_y: delta,
+                })?;
+            }
+            ControlMessage::KeyPress { key, pressed } => {
+                // Pour l'instant, pas de modifiers (TODO: ajouter au protocole)
+                let modifiers = KeyModifiers::default();
+                if pressed {
+                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Press { key }, modifiers)?;
+                } else {
+                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Release { key }, modifiers)?;
+                }
+            }
+            _ => {
+                debug!("Message non-input reçu: {:?}", msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// Setup le handler sur une connexion WebRTC existante
+    pub async fn attach_to_webrtc(self: Arc<Self>, webrtc: Arc<Mutex<WebRTCConnection>>) -> Result<()> {
+        info!("Attachement du InputHandler au WebRTC");
+
+        // Créer un canal mpsc pour éviter les "lost wakeups"
+        // Le callback WebRTC envoie les données dans le canal,
+        // et une task async les traite séparément
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        let webrtc_locked = webrtc.lock().await;
+
+        // Setup callback pour recevoir les messages du data channel
+        // Le callback envoie juste les données brutes dans le canal
+        webrtc_locked.on_data_channel_message(move |data: &[u8]| {
+            let _ = tx.send(data.to_vec());
+        }).await?;
+
+        info!("InputHandler attaché avec succès");
+
+        // Spawner une task pour traiter les messages du canal
+        let handler = self.clone();
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                // Parse le message
+                if let Ok(msg) = ControlMessage::from_bytes(&data) {
+                    if let Err(e) = handler.handle_message(msg).await {
+                        warn!("Erreur traitement message input: {}", e);
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 }

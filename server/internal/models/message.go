@@ -17,6 +17,7 @@ const (
 	TypePing               MessageType = "Ping"
 	TypePong               MessageType = "Pong"
 	TypeError              MessageType = "Error"
+	TypeAck                MessageType = "Ack" // Acquittement de réception
 )
 
 // Message représente un message de signalement
@@ -66,6 +67,7 @@ type ConnectionAcceptedMessage struct {
 
 // ConnectionRejectedMessage - connexion rejetée
 type ConnectionRejectedMessage struct {
+	PeerID string `json:"peer_id"`
 	Reason string `json:"reason"`
 }
 
@@ -73,6 +75,13 @@ type ConnectionRejectedMessage struct {
 type ErrorMessage struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// AckMessage - acquittement de réception d'un message
+type AckMessage struct {
+	MessageType string `json:"message_type"` // Type du message acquitté
+	Status      string `json:"status"`       // "success" ou "error"
+	Message     string `json:"message,omitempty"`
 }
 
 // Client représente un client connecté

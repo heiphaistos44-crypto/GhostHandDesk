@@ -82,8 +82,33 @@ pub struct SecurityConfig {
 
 impl Default for Config {
     fn default() -> Self {
+        // Lire le port depuis la variable d'environnement (priorité 1) ou le fichier (priorité 2)
+        let port = std::env::var("GHD_SERVER_PORT")
+            .ok()
+            .or_else(|| {
+                // Lire depuis UN SEUL emplacement standardisé : à côté de l'exécutable
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe_path| {
+                        let port_file = exe_path.parent()?.join("server_port.txt");
+                        match std::fs::read_to_string(&port_file) {
+                            Ok(content) => Some(content.trim().to_string()),
+                            Err(e) => {
+                                tracing::warn!("Impossible de lire {}: {}", port_file.display(), e);
+                                None
+                            }
+                        }
+                    })
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!("Port non trouvé (variable GHD_SERVER_PORT ou server_port.txt), utilisation du port par défaut 9000");
+                "9000".to_string()
+            });
+
+        let server_url = format!("ws://localhost:{}/ws", port);
+
         Self {
-            server_url: "wss://signal.ghosthand.local:8443".to_string(),
+            server_url,
             stun_servers: vec![
                 "stun:stun.l.google.com:19302".to_string(),
                 "stun:stun1.l.google.com:19302".to_string(),

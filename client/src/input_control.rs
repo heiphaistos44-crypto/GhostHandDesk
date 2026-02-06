@@ -35,6 +35,15 @@ pub enum KeyboardEvent {
     Type { text: String },
 }
 
+/// Keyboard modifiers (Ctrl, Shift, Alt, Meta)
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct KeyModifiers {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
 impl InputController {
     /// Create a new input controller
     pub fn new() -> Result<Self> {
@@ -45,13 +54,32 @@ impl InputController {
         Ok(Self { enigo })
     }
 
+    /// Obtenir la résolution totale de l'écran (approximation)
+    /// En multi-écrans, retourne une estimation basée sur le capturer
+    fn get_screen_resolution() -> (i32, i32) {
+        // TODO: Obtenir la vraie résolution multi-écrans
+        // Pour l'instant, utiliser une résolution par défaut raisonnable
+        // En production, il faudrait interroger le système pour obtenir
+        // la taille totale de l'espace d'écrans virtuels
+        (3840, 2160) // 4K par défaut
+    }
+
     /// Handle a mouse event
     pub fn handle_mouse_event(&mut self, event: MouseEvent) -> Result<()> {
         match event {
             MouseEvent::Move { x, y } => {
-                debug!("Mouse move to ({}, {})", x, y);
+                // Normaliser les coordonnées pour éviter les débordements
+                let (max_width, max_height) = Self::get_screen_resolution();
+                let clamped_x = x.max(0).min(max_width - 1);
+                let clamped_y = y.max(0).min(max_height - 1);
+
+                if clamped_x != x || clamped_y != y {
+                    debug!("Coordonnées clampées: ({}, {}) → ({}, {})", x, y, clamped_x, clamped_y);
+                }
+
+                debug!("Mouse move to ({}, {})", clamped_x, clamped_y);
                 self.enigo
-                    .move_mouse(x, y, Coordinate::Abs)
+                    .move_mouse(clamped_x, clamped_y, Coordinate::Abs)
                     .map_err(|e| {
                         GhostHandError::InputControl(format!("Failed to move mouse: {}", e))
                     })?;
@@ -94,11 +122,34 @@ impl InputController {
         Ok(())
     }
 
-    /// Handle a keyboard event
-    pub fn handle_keyboard_event(&mut self, event: KeyboardEvent) -> Result<()> {
+    /// Handle a keyboard event with optional modifiers
+    pub fn handle_keyboard_event(&mut self, event: KeyboardEvent, modifiers: KeyModifiers) -> Result<()> {
+        // Appliquer les modifiers AVANT la touche principale
+        if modifiers.ctrl {
+            self.enigo.key(Key::Control, Direction::Press).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to press Ctrl: {}", e))
+            })?;
+        }
+        if modifiers.shift {
+            self.enigo.key(Key::Shift, Direction::Press).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to press Shift: {}", e))
+            })?;
+        }
+        if modifiers.alt {
+            self.enigo.key(Key::Alt, Direction::Press).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to press Alt: {}", e))
+            })?;
+        }
+        if modifiers.meta {
+            self.enigo.key(Key::Meta, Direction::Press).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to press Meta: {}", e))
+            })?;
+        }
+
+        // Exécuter la touche principale
         match event {
             KeyboardEvent::Press { key } => {
-                debug!("Key press: {}", key);
+                debug!("Key press: {} (modifiers: {:?})", key, modifiers);
                 if let Some(k) = Self::parse_key(&key) {
                     self.enigo.key(k, Direction::Press).map_err(|e| {
                         GhostHandError::InputControl(format!("Failed to press key: {}", e))
@@ -124,6 +175,29 @@ impl InputController {
                 })?;
             }
         }
+
+        // Relâcher les modifiers APRÈS la touche principale (dans l'ordre inverse)
+        if modifiers.meta {
+            self.enigo.key(Key::Meta, Direction::Release).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to release Meta: {}", e))
+            })?;
+        }
+        if modifiers.alt {
+            self.enigo.key(Key::Alt, Direction::Release).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to release Alt: {}", e))
+            })?;
+        }
+        if modifiers.shift {
+            self.enigo.key(Key::Shift, Direction::Release).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to release Shift: {}", e))
+            })?;
+        }
+        if modifiers.ctrl {
+            self.enigo.key(Key::Control, Direction::Release).map_err(|e| {
+                GhostHandError::InputControl(format!("Failed to release Ctrl: {}", e))
+            })?;
+        }
+
         Ok(())
     }
 

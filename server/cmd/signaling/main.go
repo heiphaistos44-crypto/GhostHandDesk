@@ -26,10 +26,19 @@ func main() {
 	log.Printf("[MAIN] Configuration chargée: Host=%s, CertFile=%s, MaxClients=%d",
 		cfg.Host, cfg.CertFile, cfg.MaxClients)
 
+	// Valider la configuration
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("[MAIN] Configuration invalide: %v", err)
+	}
+	log.Println("[MAIN] Configuration validée avec succès")
+
 	// Créer et démarrer le hub
 	hub := signaling.NewHub()
 	go hub.Run()
 	log.Println("[MAIN] Hub de signalement démarré")
+
+	// Stocker le temps de démarrage pour calculer l'uptime
+	startTime := time.Now()
 
 	// Configurer les routes HTTP
 	mux := http.NewServeMux()
@@ -54,7 +63,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"total_clients": hub.GetClientCount(),
-			"uptime":        time.Since(time.Now()).String(),
+			"uptime":        time.Since(startTime).String(),
 			"max_clients":   cfg.MaxClients,
 		})
 	})
@@ -75,12 +84,12 @@ func main() {
 	go func() {
 		log.Printf("[MAIN] Serveur de signalement démarré sur %s", cfg.Host)
 		log.Println("[MAIN] Routes disponibles:")
-		log.Println("  - wss://localhost:8443/ws (WebSocket)")
-		log.Println("  - https://localhost:8443/health (Health check)")
-		log.Println("  - https://localhost:8443/stats (Statistiques)")
+		log.Printf("  - ws://localhost%s/ws (WebSocket)", cfg.Host)
+		log.Printf("  - http://localhost%s/health (Health check)", cfg.Host)
+		log.Printf("  - http://localhost%s/stats (Statistiques)", cfg.Host)
 
-		// Démarrer en HTTPS avec certificats TLS
-		if err := server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile); err != nil && err != http.ErrServerClosed {
+		// Démarrer en HTTP simple (sans TLS) pour localhost
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[MAIN] Erreur de démarrage du serveur: %v", err)
 		}
 	}()

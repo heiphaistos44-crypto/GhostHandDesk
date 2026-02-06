@@ -34,6 +34,12 @@ type Client struct {
 	Conn *websocket.Conn
 	Hub  *Hub
 	Send chan []byte
+
+	// Rate limiting
+	messageCount     int
+	lastResetTime    time.Time
+	rateLimitMu      sync.Mutex
+	maxMessagesPerMin int
 }
 
 // BroadcastMessage représente un message à diffuser
@@ -183,8 +189,35 @@ func (c *Client) WritePump() {
 	}
 }
 
+// checkRateLimit vérifie si le client dépasse la limite de messages
+func (c *Client) checkRateLimit() bool {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+
+	now := time.Now()
+	// Reset le compteur si 1 minute est passée
+	if now.Sub(c.lastResetTime) >= time.Minute {
+		c.messageCount = 0
+		c.lastResetTime = now
+	}
+
+	c.messageCount++
+	if c.messageCount > c.maxMessagesPerMin {
+		log.Printf("[RATE_LIMIT] Client %s dépasse la limite (%d messages/min)", c.ID, c.maxMessagesPerMin)
+		return false
+	}
+
+	return true
+}
+
 // handleMessage traite un message reçu
 func (c *Client) handleMessage(msg *models.Message) {
+	// Vérifier le rate limit
+	if !c.checkRateLimit() {
+		log.Printf("[CLIENT %s] Message rejeté (rate limit dépassé)", c.ID)
+		return
+	}
+
 	log.Printf("[CLIENT %s] Message reçu: %s", c.ID, msg.Type)
 
 	switch msg.Type {
@@ -196,6 +229,8 @@ func (c *Client) handleMessage(msg *models.Message) {
 		c.handleIceCandidate(msg)
 	case models.TypeConnectRequest:
 		c.handleConnectRequest(msg)
+	case models.TypeConnectionAccepted, models.TypeConnectionRejected:
+		c.handleConnectionResponse(msg)
 	case models.TypePing:
 		c.handlePing()
 	default:
@@ -205,53 +240,115 @@ func (c *Client) handleMessage(msg *models.Message) {
 
 // handleOffer traite un message d'offre WebRTC
 func (c *Client) handleOffer(msg *models.Message) {
-	data, _ := json.Marshal(msg.Data)
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal offer: %v", err)
+		return
+	}
+
+	// Validation : vérifier la taille des données (max 100KB pour offer)
+	if len(data) > 100*1024 {
+		log.Printf("[CLIENT] Offer trop grande: %d bytes", len(data))
+		return
+	}
+
 	var offer models.OfferMessage
 	if err := json.Unmarshal(data, &offer); err != nil {
 		log.Printf("[CLIENT] Erreur parsing offer: %v", err)
 		return
 	}
 
+	// Validation : vérifier que les champs obligatoires sont présents
+	if offer.To == "" || offer.SDP == "" {
+		log.Printf("[CLIENT] Offer invalide: champs obligatoires manquants")
+		c.sendAck("Offer", "error", "Champs obligatoires manquants")
+		return
+	}
+
 	// Transférer l'offre au destinataire
 	c.Hub.SendToClient(offer.To, msg)
+
+	// Envoyer ACK de succès à l'expéditeur
+	c.sendAck("Offer", "success", "")
 }
 
 // handleAnswer traite un message de réponse WebRTC
 func (c *Client) handleAnswer(msg *models.Message) {
-	data, _ := json.Marshal(msg.Data)
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal answer: %v", err)
+		return
+	}
+
+	// Validation : vérifier la taille
+	if len(data) > 100*1024 {
+		log.Printf("[CLIENT] Answer trop grande: %d bytes", len(data))
+		return
+	}
+
 	var answer models.AnswerMessage
 	if err := json.Unmarshal(data, &answer); err != nil {
 		log.Printf("[CLIENT] Erreur parsing answer: %v", err)
 		return
 	}
 
+	// Validation : champs obligatoires
+	if answer.To == "" || answer.SDP == "" {
+		log.Printf("[CLIENT] Answer invalide: champs obligatoires manquants")
+		c.sendAck("Answer", "error", "Champs obligatoires manquants")
+		return
+	}
+
 	// Transférer la réponse au destinataire
 	c.Hub.SendToClient(answer.To, msg)
+
+	// Envoyer ACK de succès à l'expéditeur
+	c.sendAck("Answer", "success", "")
 }
 
 // handleIceCandidate traite un candidat ICE
 func (c *Client) handleIceCandidate(msg *models.Message) {
-	data, _ := json.Marshal(msg.Data)
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal data: %v", err)
+		c.sendAck("IceCandidate", "error", "Erreur de marshaling")
+		return
+	}
 	var ice models.IceCandidateMessage
 	if err := json.Unmarshal(data, &ice); err != nil {
 		log.Printf("[CLIENT] Erreur parsing ICE: %v", err)
+		c.sendAck("IceCandidate", "error", "Erreur de parsing")
 		return
 	}
 
 	// Transférer le candidat au destinataire
 	c.Hub.SendToClient(ice.To, msg)
+
+	// Envoyer ACK de succès à l'expéditeur
+	c.sendAck("IceCandidate", "success", "")
 }
 
 // handleConnectRequest traite une demande de connexion
 func (c *Client) handleConnectRequest(msg *models.Message) {
-	data, _ := json.Marshal(msg.Data)
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal data: %v", err)
+		c.sendAck("ConnectRequest", "error", "Erreur de marshaling")
+		return
+	}
 	var req models.ConnectRequestMessage
 	if err := json.Unmarshal(data, &req); err != nil {
 		log.Printf("[CLIENT] Erreur parsing connect request: %v", err)
+		c.sendAck("ConnectRequest", "error", "Erreur de parsing")
 		return
 	}
 
-	log.Printf("[CLIENT %s] Demande de connexion vers %s", c.ID, req.TargetID)
+	// Masquer le password dans les logs pour la sécurité
+	passwordMasked := "***"
+	if req.Password == nil {
+		passwordMasked = "<none>"
+	}
+	log.Printf("[CLIENT %s] Demande de connexion vers %s (password: %s)", c.ID, req.TargetID, passwordMasked)
 
 	// Vérifier si le client cible existe
 	c.Hub.mu.RLock()
@@ -267,14 +364,64 @@ func (c *Client) handleConnectRequest(msg *models.Message) {
 				Message: "Client cible non trouvé",
 			},
 		}
-		data, _ := json.Marshal(response)
-		c.Send <- data
+		responseData, _ := json.Marshal(response)
+		c.Send <- responseData
+
+		// Envoyer ACK d'erreur
+		c.sendAck("ConnectRequest", "error", "Client cible non trouvé")
 		return
 	}
 
+	// Créer la notification de demande pour le client cible
+	// On inclut l'ID de l'expéditeur pour que le client cible sache qui demande la connexion
+	notification := models.Message{
+		Type: models.TypeConnectRequest,
+		Data: map[string]interface{}{
+			"from":     c.ID,
+			"password": req.Password,
+		},
+	}
+
 	// Transférer la demande au client cible
-	// Dans une vraie implémentation, on attendrait l'acceptation du client cible
-	c.Hub.SendToClient(req.TargetID, msg)
+	c.Hub.SendToClient(req.TargetID, notification)
+	log.Printf("[HUB] Demande de connexion transférée de %s vers %s", c.ID, req.TargetID)
+
+	// Envoyer ACK de succès à l'expéditeur
+	c.sendAck("ConnectRequest", "success", "")
+}
+
+// handleConnectionResponse traite une réponse à une demande de connexion (acceptation ou rejet)
+func (c *Client) handleConnectionResponse(msg *models.Message) {
+	// Cette fonction sera appelée quand un client accepte ou rejette une connexion
+	switch msg.Type {
+	case models.TypeConnectionAccepted:
+		data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal data: %v", err)
+		return
+	}
+		var accepted models.ConnectionAcceptedMessage
+		if err := json.Unmarshal(data, &accepted); err != nil {
+			log.Printf("[CLIENT] Erreur parsing connection accepted: %v", err)
+			return
+		}
+		log.Printf("[CLIENT %s] A accepté la connexion de %s", c.ID, accepted.PeerID)
+		c.Hub.SendToClient(accepted.PeerID, msg)
+
+	case models.TypeConnectionRejected:
+		data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal data: %v", err)
+		return
+	}
+		var rejected models.ConnectionRejectedMessage
+		if err := json.Unmarshal(data, &rejected); err != nil {
+			log.Printf("[CLIENT] Erreur parsing connection rejected: %v", err)
+			return
+		}
+		log.Printf("[CLIENT %s] A rejeté la connexion de %s: %s", c.ID, rejected.PeerID, rejected.Reason)
+		c.Hub.SendToClient(rejected.PeerID, msg)
+	}
 }
 
 // handlePing traite un message de ping
@@ -282,6 +429,33 @@ func (c *Client) handlePing() {
 	response := models.Message{
 		Type: models.TypePong,
 	}
-	data, _ := json.Marshal(response)
+	data, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal pong: %v", err)
+		return
+	}
 	c.Send <- data
+}
+
+// sendAck envoie un acquittement (ACK) au client
+func (c *Client) sendAck(messageType string, status string, message string) {
+	ackMsg := models.Message{
+		Type: models.TypeAck,
+		Data: models.AckMessage{
+			MessageType: messageType,
+			Status:      status,
+			Message:     message,
+		},
+	}
+	data, err := json.Marshal(ackMsg)
+	if err != nil {
+		log.Printf("[CLIENT] Erreur marshal ACK: %v", err)
+		return
+	}
+	select {
+	case c.Send <- data:
+		log.Printf("[CLIENT %s] ACK envoyé: %s - %s", c.ID, messageType, status)
+	default:
+		log.Printf("[CLIENT %s] Canal saturé, ACK non envoyé", c.ID)
+	}
 }
