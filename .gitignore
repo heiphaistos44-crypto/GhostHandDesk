@@ -81,3 +81,13 @@ config.json
 
 # Claude Code
 .claude/
+
+# Generated portable package
+GhostHandDesk-Portable/
+GhostHandDesk-Portable.zip
+
+# Runtime data directories
+client/logs/
+client/data/
+logs/
+data/

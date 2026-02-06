@@ -1,0 +1,13 @@
+{
+  "name": "ghosthanddesk-client-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wrapper package for Tauri",
+  "scripts": {
+    "dev": "cd ui && npm run dev",
+    "build": "cd ui && npm run build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1"
+  }
+}

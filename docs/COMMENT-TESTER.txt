@@ -1,0 +1,63 @@
+========================================
+   COMMENT TESTER GHOSTHANDDESK
+========================================
+
+ETAPE 1: Lancer le serveur
+---------------------------
+Double-cliquez sur: 1-lancer-serveur.bat
+Gardez cette fenetre ouverte !
+
+
+ETAPE 2: Lancer la premiere instance
+-------------------------------------
+Double-cliquez sur: 2-lancer-application.bat
+Une fenetre s'ouvre avec votre Device ID en haut.
+Copiez ce Device ID (bouton copier).
+
+
+ETAPE 3: Lancer la deuxieme instance
+-------------------------------------
+Double-cliquez ENCORE sur: 2-lancer-application.bat
+Une DEUXIEME fenetre s'ouvre.
+
+
+ETAPE 4: Se connecter
+---------------------
+Dans la DEUXIEME fenetre:
+  1. Cliquez sur "Se connecter a un appareil distant"
+  2. Collez le Device ID de la premiere instance
+  3. Cliquez "Se connecter"
+
+
+ETAPE 5: Accepter la connexion
+-------------------------------
+Dans la PREMIERE fenetre:
+  1. Un popup apparait "Demande de Connexion"
+  2. Cliquez sur "Accepter"
+
+
+ETAPE 6: Tester le controle
+----------------------------
+Dans la DEUXIEME fenetre:
+  - Vous devriez voir l'ecran de la premiere instance
+  - Vous pouvez controler la souris/clavier a distance
+
+
+NOTES:
+------
+- Le serveur doit rester ouvert pendant tout le test
+- Vous pouvez lancer autant d'instances que vous voulez
+- Pour arreter: fermez simplement les fenetres
+
+
+DEPANNAGE:
+----------
+Si "Connexion en cours" reste bloque:
+  1. Verifiez que le serveur est lance
+  2. Verifiez que les deux Device IDs sont differents
+  3. Regardez les logs du serveur pour voir les messages
+
+Si l'application ne s'ouvre pas:
+  1. Verifiez que le fichier existe:
+     client\src-tauri\target\release\ghosthanddesk-tauri.exe
+  2. Si non, relancez la compilation

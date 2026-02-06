@@ -7,6 +7,35 @@
 
 **GhostHandDesk** est une solution de bureau à distance open-source, sécurisée et performante, construite avec Rust, Go et WebRTC.
 
+---
+
+## 🎯 Démarrage Ultra-Rapide
+
+### Lancer l'Application
+```bash
+LANCER-APPLICATION.bat
+```
+
+### Créer le Package Portable (.exe)
+```bash
+BUILD-PORTABLE.bat
+```
+
+### Organisation du Projet
+```
+GhostHandDesk/
+├── LANCER-APPLICATION.bat     # 🚀 Lancer l'application
+├── BUILD-PORTABLE.bat          # 📦 Créer le package portable
+├── README.md                   # 📖 Ce fichier
+├── server_port.txt             # ⚙️ Configuration du port
+├── client/                     # 💻 Code client (Rust + Tauri + Vue)
+├── server/                     # 🖧 Code serveur (Go + WebSocket)
+├── docs/                       # 📚 Documentation complète
+└── scripts/                    # 🔧 Scripts utilitaires
+```
+
+---
+
 ## ✨ Fonctionnalités
 
 ### 🔐 Sécurité
