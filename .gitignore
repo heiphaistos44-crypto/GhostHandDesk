@@ -1,0 +1,58 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Go
+*.exe
+!scripts/*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs
+logs/
+*.log
+*.jsonl
+
+# Data
+data/
+*.db
+*.sqlite
+
+# Certs
+certs/*.pem
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tauri
+client/src-tauri/target/
+client/ui/dist/
+
+# Portable package
+GhostHandDesk-Portable/logs/
+GhostHandDesk-Portable/data/
+GhostHandDesk-Portable/Instance1/
+GhostHandDesk-Portable/Instance2/
+GhostHandDesk-Portable/_start_server.bat
+GhostHandDesk-Portable/*.exe
+
+# Temp
+*.tmp
+*.temp
+_start_server.bat
