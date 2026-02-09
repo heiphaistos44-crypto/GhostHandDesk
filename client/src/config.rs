@@ -47,13 +47,14 @@ pub struct VideoConfig {
     pub resolution: Option<(u32, u32)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VideoCodec {
     H264,
     H265,
     VP8,
     VP9,
     AV1,
+    JPEG,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

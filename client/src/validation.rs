@@ -157,7 +157,13 @@ pub fn validate_password(password: &str) -> Result<()> {
 /// Sanitize une chaîne pour logs (remplacer caractères sensibles)
 pub fn sanitize_for_logging(input: &str, max_len: usize) -> String {
     let truncated = if input.len() > max_len {
-        format!("{}... (tronqué)", &input[..max_len])
+        // Trouver la frontière UTF-8 valide la plus proche de max_len
+        let end = input.char_indices()
+            .take_while(|(i, _)| *i < max_len)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}... (tronqué)", &input[..end])
     } else {
         input.to_string()
     };
@@ -341,6 +347,22 @@ mod tests {
         // Troncation
         let result = sanitize_for_logging("very long text here", 10);
         assert!(result.starts_with("very long "));
+        assert!(result.contains("tronqué"));
+    }
+
+    #[test]
+    fn test_sanitize_for_logging_utf8_multibyte() {
+        // Emoji = 4 bytes UTF-8, couper à 3 ne doit PAS paniquer
+        let result = sanitize_for_logging("A\u{1F600}B", 3);
+        assert!(result.starts_with("A"));
+        assert!(result.contains("tronqué"));
+
+        // Caractères accentués (2 bytes UTF-8)
+        let result = sanitize_for_logging("éàü test", 2);
+        assert!(result.contains("tronqué"));
+
+        // Chaîne vide avec max_len 0
+        let result = sanitize_for_logging("test", 0);
         assert!(result.contains("tronqué"));
     }
 

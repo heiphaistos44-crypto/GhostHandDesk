@@ -2,10 +2,11 @@
 //!
 //! Ce module gère la boucle de capture, encodage et transmission vidéo.
 
+use crate::adaptive_bitrate::AdaptiveBitrateController;
 use crate::error::{GhostHandError, Result};
 use crate::input_control::{InputController, MouseButton, MouseEvent as InputMouseEvent, KeyboardEvent as InputKeyboardEvent, KeyModifiers};
 use crate::network::WebRTCConnection;
-use crate::protocol::ControlMessage;
+use crate::protocol::{ControlMessage, KeyModifiersProto};
 use crate::screen_capture::ScreenCapturer;
 use crate::video_encoder::VideoEncoder;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub struct Streamer {
     webrtc: Arc<Mutex<WebRTCConnection>>,
     framerate: u32,
     running: Arc<AtomicBool>,
+    adaptive_controller: Option<Arc<Mutex<AdaptiveBitrateController>>>,
 }
 
 impl Streamer {
@@ -37,12 +39,23 @@ impl Streamer {
             webrtc: Arc::new(Mutex::new(webrtc)),
             framerate,
             running: Arc::new(AtomicBool::new(false)),
+            adaptive_controller: None,
         }
+    }
+
+    /// Activer le contrôle adaptatif du bitrate
+    pub fn with_adaptive_bitrate(mut self, controller: AdaptiveBitrateController) -> Self {
+        self.adaptive_controller = Some(Arc::new(Mutex::new(controller)));
+        self
     }
 
     /// Démarrer le streaming
     pub async fn start(&self) -> Result<()> {
         info!("Démarrage du streaming vidéo à {} FPS", self.framerate);
+
+        // Note: E2E encryption dans le pipeline vidéo n'est pas encore intégré
+        // L'encryption E2E est gérée au niveau WebRTC (DTLS-SRTP) pour le moment
+        warn!("E2E encryption au niveau applicatif non intégré dans le pipeline vidéo - DTLS-SRTP actif par défaut");
 
         // Marquer comme running (AtomicBool = pas de lock)
         self.running.store(true, Ordering::SeqCst);
@@ -57,10 +70,11 @@ impl Streamer {
         while self.running.load(Ordering::SeqCst) {
             ticker.tick().await;
 
-            // 1. Capturer frame (scope explicite pour libérer le lock immédiatement)
+            // 1. Capturer frame ASYNC (scope explicite pour libérer le lock immédiatement)
+            // PERF-001: Utilisation de capture_async() pour ne pas bloquer le runtime Tokio
             let frame = {
                 let mut capturer_guard = self.capturer.lock().await;
-                match capturer_guard.capture() {
+                match capturer_guard.capture_async().await {
                     Ok(f) => {
                         // Reset error count sur succès
                         error_count = 0;
@@ -101,7 +115,8 @@ impl Streamer {
                 format: "jpeg".to_string(), // ou "h264" selon l'encoder
             };
 
-            // 4. Envoyer via WebRTC (scope explicite)
+            // 4. Envoyer via WebRTC (scope explicite) + mesure RTT proxy
+            let send_start = std::time::Instant::now();
             match message.to_bytes() {
                 Ok(bytes) => {
                     let webrtc_guard = self.webrtc.lock().await;
@@ -114,6 +129,19 @@ impl Streamer {
                 Err(e) => {
                     warn!("Erreur de sérialisation du message: {}", e);
                 }
+            }
+
+            // 5. Adaptive bitrate : utiliser durée d'envoi comme proxy RTT
+            if let Some(ref controller) = self.adaptive_controller {
+                let send_duration = send_start.elapsed();
+                let mut ctrl = controller.lock().await;
+                ctrl.update_rtt(send_duration);
+
+                // Appliquer la qualité recommandée à l'encodeur via le trait
+                let new_quality = ctrl.get_quality();
+                drop(ctrl); // Libérer le lock du controller
+                let mut encoder_guard = self.encoder.lock().await;
+                encoder_guard.adjust_quality(new_quality);
             }
 
             frame_count += 1;
@@ -245,13 +273,22 @@ impl InputHandler {
                     delta_y: delta,
                 })?;
             }
-            ControlMessage::KeyPress { key, pressed } => {
-                // Pour l'instant, pas de modifiers (TODO: ajouter au protocole)
-                let modifiers = KeyModifiers::default();
-                if pressed {
-                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Press { key }, modifiers)?;
+            ControlMessage::KeyPress { key, pressed, modifiers } => {
+                // Convertir les modifiers du protocole vers input_control
+                let key_modifiers = if let Some(m) = modifiers {
+                    KeyModifiers {
+                        ctrl: m.ctrl,
+                        shift: m.shift,
+                        alt: m.alt,
+                        meta: m.meta,
+                    }
                 } else {
-                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Release { key }, modifiers)?;
+                    KeyModifiers::default()
+                };
+                if pressed {
+                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Press { key }, key_modifiers)?;
+                } else {
+                    self.controller.lock().await.handle_keyboard_event(InputKeyboardEvent::Release { key }, key_modifiers)?;
                 }
             }
             _ => {

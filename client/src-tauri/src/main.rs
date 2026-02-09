@@ -1,4 +1,4 @@
-// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Désactivé pour debug
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod storage_commands;
 
@@ -265,10 +265,17 @@ async fn send_keyboard_event(
 
     if let Some(session) = session_guard.as_ref() {
         if let Some(webrtc) = &session.webrtc {
-            // Convertir en ControlMessage
+            // Convertir en ControlMessage avec modifiers
+            use ghost_hand_client::protocol::KeyModifiersProto;
             let msg = ControlMessage::KeyPress {
                 key: event.key.clone(),
                 pressed: event.r#type == "keydown",
+                modifiers: Some(KeyModifiersProto {
+                    ctrl: event.modifiers.ctrl,
+                    shift: event.modifiers.shift,
+                    alt: event.modifiers.alt,
+                    meta: event.modifiers.meta,
+                }),
             };
 
             // Envoyer via WebRTC
@@ -541,6 +548,7 @@ async fn start_listening_for_requests(
             match msg_result {
                 Ok(msg) => {
                     if msg.is_type("ConnectRequest") {
+                        println!("[LISTENER] ConnectRequest reçu - raw data: {:?}", msg.data);
                         if let Some(from) = msg.get_str("from") {
                             println!("[LISTENER] Demande de connexion reçue de {}", from);
 
@@ -707,20 +715,8 @@ fn main() {
         })
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                println!("[APP] Fenêtre fermée - Nettoyage des processus...");
-
-                // Tuer tous les processus du serveur
-                #[cfg(target_os = "windows")]
-                {
-                    use std::process::Command;
-
-                    // Tuer le serveur de signalement
-                    let _ = Command::new("taskkill")
-                        .args(&["/F", "/IM", "signaling-server.exe"])
-                        .output();
-
-                    println!("[APP] Processus serveur tués");
-                }
+                println!("[APP] Fenêtre fermée");
+                // Le serveur est géré séparément - pas de nettoyage de processus
             }
         })
         .run(tauri::generate_context!())

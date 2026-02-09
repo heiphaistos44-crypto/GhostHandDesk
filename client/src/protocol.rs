@@ -1,6 +1,19 @@
 /// Protocol de messages échangés via le data channel WebRTC
 use serde::{Deserialize, Serialize};
 
+/// Modifiers clavier transmis avec les événements KeyPress
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyModifiersProto {
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub meta: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ControlMessage {
@@ -36,6 +49,8 @@ pub enum ControlMessage {
     KeyPress {
         key: String,
         pressed: bool,
+        #[serde(default)]
+        modifiers: Option<KeyModifiersProto>,
     },
 
     // System

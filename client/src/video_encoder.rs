@@ -11,6 +11,10 @@ pub trait VideoEncoder: Send + Sync {
 
     /// Get encoder info
     fn get_info(&self) -> EncoderInfo;
+
+    /// Ajuster la qualité dynamiquement (utilisé par adaptive bitrate)
+    /// Default: no-op pour les encodeurs qui ne supportent pas l'ajustement
+    fn adjust_quality(&mut self, _quality: u8) {}
 }
 
 /// Encoded frame data
@@ -45,7 +49,7 @@ impl ImageEncoder {
         Ok(Self {
             quality: 85, // Qualité par défaut (haute)
             info: EncoderInfo {
-                codec: VideoCodec::H264, // Not really H264, but placeholder
+                codec: VideoCodec::JPEG,
                 width,
                 height,
                 framerate,
@@ -126,6 +130,10 @@ impl VideoEncoder for ImageEncoder {
     fn get_info(&self) -> EncoderInfo {
         self.info.clone()
     }
+
+    fn adjust_quality(&mut self, quality: u8) {
+        self.set_quality(quality);
+    }
 }
 
 // Note: For production, we would implement FFmpeg-based encoder
@@ -168,6 +176,9 @@ impl FFmpegEncoder {
             VideoCodec::VP8 => "libvpx",
             VideoCodec::VP9 => "libvpx-vp9",
             VideoCodec::AV1 => "libaom-av1",
+            VideoCodec::JPEG => return Err(GhostHandError::VideoEncoding(
+                "JPEG n'est pas supporté par FFmpegEncoder, utiliser ImageEncoder".to_string()
+            )),
         };
 
         let codec_id = match codec {
@@ -176,6 +187,7 @@ impl FFmpegEncoder {
             VideoCodec::VP8 => ffmpeg::codec::Id::VP8,
             VideoCodec::VP9 => ffmpeg::codec::Id::VP9,
             VideoCodec::AV1 => ffmpeg::codec::Id::AV1,
+            VideoCodec::JPEG => unreachable!(),
         };
 
         // 3. Trouver l'encodeur
@@ -431,6 +443,7 @@ mod tests {
             VideoCodec::VP8,
             VideoCodec::VP9,
             VideoCodec::AV1,
+            VideoCodec::JPEG,
         ];
 
         for codec in codecs {
@@ -441,6 +454,7 @@ mod tests {
                     | VideoCodec::VP8
                     | VideoCodec::VP9
                     | VideoCodec::AV1
+                    | VideoCodec::JPEG
             ));
         }
     }

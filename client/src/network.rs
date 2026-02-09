@@ -1,6 +1,7 @@
 use crate::audit::{audit_log, AuditEvent, AuditLevel};
 use crate::config::Config;
 use crate::error::{error_codes, GhostHandError, Result};
+use crate::validation;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -22,10 +23,6 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 // Constantes réseau
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const CONNECTION_TIMEOUT_SECS: u64 = 30;
-const MAX_SDP_SIZE: usize = 100 * 1024; // 100 KB max pour un SDP
-const MAX_DEVICE_ID_LENGTH: usize = 64;   // Longueur max Device ID
-const MAX_ICE_CANDIDATE_LENGTH: usize = 512; // Longueur max ICE candidate
-const MIN_DEVICE_ID_LENGTH: usize = 5;    // Longueur min Device ID
 
 
 /// Signaling message types - format compatible avec le serveur Go
@@ -455,12 +452,8 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
-        // Validation taille SDP
-        if offer.sdp.len() > MAX_SDP_SIZE {
-            return Err(GhostHandError::WebRTC(format!(
-                "SDP offer trop grand: {} bytes (max {})", offer.sdp.len(), MAX_SDP_SIZE
-            )));
-        }
+        // Validation SDP via module validation
+        validation::validate_sdp(&offer.sdp)?;
 
         info!("Offre WebRTC créée avec succès");
 
@@ -495,12 +488,8 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
-        // Validation taille SDP
-        if answer.sdp.len() > MAX_SDP_SIZE {
-            return Err(GhostHandError::WebRTC(format!(
-                "SDP answer trop grand: {} bytes (max {})", answer.sdp.len(), MAX_SDP_SIZE
-            )));
-        }
+        // Validation SDP via module validation
+        validation::validate_sdp(&answer.sdp)?;
 
         info!("Réponse WebRTC créée avec succès");
 
@@ -510,12 +499,8 @@ impl WebRTCConnection {
 
     /// Set remote description
     pub async fn set_remote_description(&self, sdp: &str, sdp_type: RTCSdpType) -> Result<()> {
-        // Validation taille SDP reçu
-        if sdp.len() > MAX_SDP_SIZE {
-            return Err(GhostHandError::WebRTC(format!(
-                "SDP reçu trop grand: {} bytes (max {})", sdp.len(), MAX_SDP_SIZE
-            )));
-        }
+        // Validation SDP via module validation
+        validation::validate_sdp(sdp)?;
 
         info!("Définition de la description distante (type: {:?})", sdp_type);
 
@@ -658,6 +643,12 @@ impl SessionManager {
 
     /// Request connection to a remote device
     pub async fn connect_to_device(&mut self, target_id: String, password: Option<String>) -> Result<()> {
+        // Valider les entrées
+        validation::validate_device_id(&target_id)?;
+        if let Some(ref pwd) = password {
+            validation::validate_password(pwd)?;
+        }
+
         info!("Connexion à {} demandée", target_id);
 
         // Sauvegarder le fait qu'un password est fourni avant de le move
@@ -665,11 +656,14 @@ impl SessionManager {
         let password_clone = password.clone();
 
         // 1. Envoyer ConnectRequest et attendre ConnectionAccepted
+        let connect_msg = SignalMessage::connect_request(target_id.clone(), password);
+        debug!("📤 [CLIENT] AVANT ENVOI ConnectRequest vers {} | Message: {:?}", target_id, connect_msg);
+
         self.signaling.as_ref().ok_or_else(|| {
             GhostHandError::Network("Not connected to signaling server".to_string())
-        })?.send(SignalMessage::connect_request(target_id.clone(), password)).await?;
+        })?.send(connect_msg).await?;
 
-        info!("Demande de connexion envoyée à {}, attente d'acceptation...", target_id);
+        info!("✅ [CLIENT] Demande de connexion envoyée à {}, attente d'acceptation...", target_id);
 
         // Attendre ConnectionAccepted
         let timeout = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS));
@@ -677,7 +671,13 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("ConnectionAccepted") {
                         // Le message vient du target qui a accepté
                         info!("Connexion acceptée par {}", target_id);
@@ -697,7 +697,9 @@ impl SessionManager {
 
                                 let response = crate::crypto::compute_challenge_response(pwd, &salt, &challenge);
 
-                                self.signaling.as_ref().unwrap().send(
+                                self.signaling.as_ref().ok_or_else(|| {
+                                    GhostHandError::Network("Signaling disconnected".into())
+                                })?.send(
                                     SignalMessage::password_response(target_id.clone(), response)
                                 ).await?;
 
@@ -834,7 +836,9 @@ impl SessionManager {
         info!("Création de l'offre WebRTC");
         let offer_sdp = webrtc_conn.create_offer().await?;
 
-        self.signaling.as_ref().unwrap().send(SignalMessage::offer(
+        self.signaling.as_ref().ok_or_else(|| {
+            GhostHandError::Network("Signaling disconnected".into())
+        })?.send(SignalMessage::offer(
             self.device_id.clone(),
             target_id.clone(),
             offer_sdp,
@@ -850,7 +854,13 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("Answer") {
                         if let Some(from) = msg.get_str("from") {
                             if from == target_id {
@@ -1000,7 +1010,9 @@ impl SessionManager {
         let answer_sdp = webrtc_conn.create_answer(&offer_sdp).await?;
 
         // 5. Envoyer answer
-        self.signaling.as_ref().unwrap().send(SignalMessage::answer(
+        self.signaling.as_ref().ok_or_else(|| {
+            GhostHandError::Network("Signaling disconnected".into())
+        })?.send(SignalMessage::answer(
             self.device_id.clone(),
             from.clone(),
             answer_sdp,
@@ -1014,7 +1026,13 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("IceCandidate") {
                         if let Some(ice_from) = msg.get_str("from") {
                             if ice_from == from {
@@ -1081,7 +1099,13 @@ impl SessionManager {
 
             let password_ok = loop {
                 tokio::select! {
-                    Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                    msg_result = async {
+                        match self.signaling.as_mut() {
+                            Some(s) => s.receive().await,
+                            None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                        }
+                    } => {
+                        let msg = msg_result?;
                         if msg.is_type("PasswordResponse") {
                             if let Some(response) = msg.get_str("response") {
                                 let valid = crate::crypto::verify_challenge_response(
@@ -1104,7 +1128,9 @@ impl SessionManager {
 
             if !password_ok {
                 // Rejeter la connexion
-                self.signaling.as_ref().unwrap().send(
+                self.signaling.as_ref().ok_or_else(|| {
+                    GhostHandError::Network("Signaling disconnected".into())
+                })?.send(
                     SignalMessage::connection_rejected(from.clone(), "Password incorrect".to_string())
                 ).await?;
 
@@ -1147,7 +1173,13 @@ impl SessionManager {
 
         let offer_sdp = loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("Offer") {
                         if let Some(offer_from) = msg.get_str("from") {
                             if offer_from == from {
@@ -1214,16 +1246,18 @@ impl SessionManager {
     }
 }
 
-/// Generate a random device ID
+/// Generate a random device ID with timestamp + random component
 pub fn generate_device_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
+    use rand::Rng;
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
-    format!("GHD-{:x}", timestamp)
+    let random_part: u32 = rand::thread_rng().gen();
+    format!("GHD-{:x}-{:x}", timestamp, random_part)
 }
 
 #[cfg(test)]
@@ -1233,20 +1267,16 @@ mod tests {
     #[test]
     fn test_generate_device_id() {
         let id1 = generate_device_id();
-
-        // Petit délai pour s'assurer d'une milliseconde différente
-        std::thread::sleep(std::time::Duration::from_millis(2));
-
         let id2 = generate_device_id();
 
         // Vérifier format
         assert!(id1.starts_with("GHD-"));
         assert!(id2.starts_with("GHD-"));
 
-        // Vérifier longueur minimale
-        assert!(id1.len() > 8);
+        // Vérifier longueur minimale (GHD- + timestamp hex + - + random hex)
+        assert!(id1.len() > 12);
 
-        // IDs doivent être différents (avec le délai)
+        // IDs doivent être différents grâce à la composante aléatoire
         assert_ne!(id1, id2);
     }
 

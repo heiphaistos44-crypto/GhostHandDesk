@@ -24,6 +24,9 @@ pub struct AdaptiveBitrateController {
     /// Dernière mesure de RTT
     last_rtt_measurement: Instant,
 
+    /// Dernier ajustement de qualité (séparé de last_rtt_measurement)
+    last_adjustment_time: Instant,
+
     /// Configuration
     config: AdaptiveBitrateConfig,
 
@@ -122,6 +125,7 @@ impl AdaptiveBitrateController {
             rtt_history: VecDeque::with_capacity(config.history_size),
             packet_loss_history: VecDeque::with_capacity(config.history_size),
             last_rtt_measurement: Instant::now(),
+            last_adjustment_time: Instant::now(),
             config,
             stats: AdaptiveBitrateStats::default(),
         }
@@ -205,7 +209,7 @@ impl AdaptiveBitrateController {
     /// Ajuster la qualité si les conditions ont changé
     fn maybe_adjust(&mut self) {
         // Vérifier l'intervalle minimum entre ajustements
-        if self.last_rtt_measurement.elapsed().as_millis() < self.config.adjustment_interval_ms as u128 {
+        if self.last_adjustment_time.elapsed().as_millis() < self.config.adjustment_interval_ms as u128 {
             return; // Trop tôt
         }
 
@@ -223,8 +227,10 @@ impl AdaptiveBitrateController {
 
         if should_reduce {
             self.reduce_quality(avg_rtt, avg_loss);
+            self.last_adjustment_time = Instant::now();
         } else if should_improve {
             self.increase_quality();
+            self.last_adjustment_time = Instant::now();
         }
     }
 
@@ -286,6 +292,7 @@ impl AdaptiveBitrateController {
         self.current_bitrate = (self.config.min_bitrate + self.config.max_bitrate) / 2;
         self.rtt_history.clear();
         self.packet_loss_history.clear();
+        self.last_adjustment_time = Instant::now();
         self.stats = AdaptiveBitrateStats::default();
 
         info!("Contrôleur adaptatif réinitialisé: quality={}, bitrate={} kbps",
