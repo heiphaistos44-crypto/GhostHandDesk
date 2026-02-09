@@ -6,7 +6,7 @@ use crate::adaptive_bitrate::AdaptiveBitrateController;
 use crate::error::{GhostHandError, Result};
 use crate::input_control::{InputController, MouseButton, MouseEvent as InputMouseEvent, KeyboardEvent as InputKeyboardEvent, KeyModifiers};
 use crate::network::WebRTCConnection;
-use crate::protocol::{ControlMessage, KeyModifiersProto};
+use crate::protocol::ControlMessage;
 use crate::screen_capture::ScreenCapturer;
 use crate::video_encoder::VideoEncoder;
 use std::sync::Arc;
