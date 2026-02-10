@@ -258,20 +258,34 @@ impl SignalingClient {
         self.tx = Some(tx);
         self.rx = Some(rx);
 
-        // Spawn task to handle outgoing messages
-        let handle_out = tokio::spawn(async move {
-            while let Some(msg) = internal_rx.recv().await {
-                let json = match serde_json::to_string(&msg) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        error!("Failed to serialize message: {}", e);
-                        continue;
-                    }
-                };
+        // Canal pour envoyer des messages WebSocket bruts (Pong) depuis handle_in vers handle_out
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<Message>();
 
-                if let Err(e) = write.send(Message::Text(json)).await {
-                    error!("Failed to send message: {}", e);
-                    break;
+        // Spawn task to handle outgoing messages (SignalMessages + raw Pong)
+        let handle_out = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(msg) = internal_rx.recv() => {
+                        let json = match serde_json::to_string(&msg) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                error!("Failed to serialize message: {}", e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = write.send(Message::Text(json)).await {
+                            error!("Failed to send message: {}", e);
+                            break;
+                        }
+                    }
+                    Some(raw_msg) = raw_rx.recv() => {
+                        // Envoyer message brut (Pong response)
+                        if let Err(e) = write.send(raw_msg).await {
+                            error!("Failed to send raw message: {}", e);
+                            break;
+                        }
+                    }
+                    else => break,
                 }
             }
         });
@@ -290,9 +304,13 @@ impl SignalingClient {
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to deserialize message: {}", e);
+                                warn!("Failed to deserialize message: {} | text: {}", e, &text[..text.len().min(100)]);
                             }
                         }
+                    }
+                    Ok(Message::Ping(data)) => {
+                        // Répondre au Ping avec un Pong (sinon le serveur déconnecte après 60s)
+                        let _ = raw_tx.send(Message::Pong(data));
                     }
                     Ok(Message::Close(_)) => {
                         info!("WebSocket connection closed");

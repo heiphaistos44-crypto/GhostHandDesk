@@ -73,7 +73,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import ConnectDialog from './components/ConnectDialog.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
@@ -126,11 +125,14 @@ onMounted(async () => {
     // Démarrer l'écoute des demandes de connexion entrantes
     await invoke('start_listening_for_requests');
 
-    // Écouter les events de demande de connexion
-    await listen<ConnectionRequest>('connection-request', (event) => {
-      pendingRequest.value = event.payload;
+    // Écouter les demandes de connexion via DOM CustomEvent
+    // (window.eval() + CustomEvent car le Tauri event system ne fonctionne pas)
+    window.addEventListener('ghosthand-connect-request', ((event: CustomEvent) => {
+      console.log('[APP] Demande de connexion reçue:', event.detail);
+      pendingRequest.value = event.detail;
       connectionRequestVisible.value = true;
-    });
+    }) as EventListener);
+    console.log('[APP] Listener connexion enregistré');
 
   } catch (error) {
     console.error('Erreur initialisation:', error);

@@ -18,11 +18,33 @@ use ghost_hand_client::video_encoder;
 // Serveur de signalement embarqué dans le binaire
 const EMBEDDED_SERVER: &[u8] = include_bytes!("../../../server/signaling-server.exe");
 
-/// Extraire et lancer le serveur de signalement embarqué
-fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> {
+/// Liste des ports à essayer pour le serveur de signalement
+const SERVER_PORTS: &[u16] = &[9000, 9001, 9002, 9003, 9004];
+
+/// Vérifier si le port est déjà utilisé (un autre serveur tourne déjà)
+fn is_port_in_use(port: u16) -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// Écrire le port actif dans server_port.txt (à côté de l'exécutable)
+/// Config::default() lira ce fichier pour construire le server_url
+fn write_server_port(port: u16) {
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            let port_file = dir.join("server_port.txt");
+            if let Err(e) = std::fs::write(&port_file, port.to_string()) {
+                eprintln!("[SERVER] Impossible d'écrire server_port.txt: {}", e);
+            } else {
+                println!("[SERVER] Port {} écrit dans {}", port, port_file.display());
+            }
+        }
+    }
+}
+
+/// Extraire le binaire du serveur embarqué (si nécessaire)
+fn extract_server_binary() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     use std::io::Write;
 
-    // Dossier temp à côté de l'exécutable
     let server_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|p| p.join(".ghd-server")))
@@ -35,7 +57,6 @@ fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> 
 
     let server_path = server_dir.join("signaling-server.exe");
 
-    // Écrire le serveur seulement si absent ou taille différente (mise à jour)
     let need_extract = if server_path.exists() {
         match std::fs::metadata(&server_path) {
             Ok(meta) => meta.len() != EMBEDDED_SERVER.len() as u64,
@@ -61,27 +82,65 @@ fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> 
         }
     }
 
-    // Lancer le serveur avec les variables d'environnement nécessaires
-    println!("[SERVER] Lancement du serveur de signalement...");
-    match std::process::Command::new(&server_path)
-        .env("REQUIRE_TLS", "false")
-        .env("DISABLE_ORIGIN_CHECK", "true")
-        .env("PORT", "9000")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => {
-            println!("[SERVER] Serveur démarré (PID: {})", child.id());
-            // Attendre un peu pour que le serveur soit prêt
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            Some((child, server_dir))
-        }
-        Err(e) => {
-            eprintln!("[SERVER] Erreur de lancement du serveur: {}", e);
-            None
+    Some((server_path, server_dir))
+}
+
+/// Extraire et lancer le serveur de signalement embarqué
+/// Essaie les ports 9000-9004. Si un port est déjà pris, utilise le serveur existant.
+fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> {
+    // 1. Vérifier si un serveur tourne déjà sur un des ports connus
+    for &port in SERVER_PORTS {
+        if is_port_in_use(port) {
+            println!("[SERVER] Port {} déjà en écoute - serveur existant détecté, connexion au serveur existant", port);
+            write_server_port(port);
+            return None; // Pas besoin de lancer, on se connecte à l'existant
         }
     }
+
+    // 2. Aucun serveur existant - extraire le binaire
+    let (server_path, server_dir) = extract_server_binary()?;
+
+    // 3. Essayer de lancer le serveur sur chaque port
+    for &port in SERVER_PORTS {
+        println!("[SERVER] Tentative de lancement sur le port {}...", port);
+        match std::process::Command::new(&server_path)
+            .env("REQUIRE_TLS", "false")
+            .env("DISABLE_ORIGIN_CHECK", "true")
+            .env("PORT", port.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                println!("[SERVER] Serveur démarré (PID: {}) sur port {}", child.id(), port);
+                // Attendre que le serveur soit prêt
+                std::thread::sleep(std::time::Duration::from_millis(500));
+
+                // Vérifier que le serveur écoute bien
+                if is_port_in_use(port) {
+                    println!("[SERVER] Serveur confirmé actif sur port {}", port);
+                    write_server_port(port);
+                    return Some((child, server_dir));
+                } else {
+                    println!("[SERVER] Port {} pas encore prêt, attente supplémentaire...", port);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if is_port_in_use(port) {
+                        println!("[SERVER] Serveur confirmé actif sur port {}", port);
+                        write_server_port(port);
+                        return Some((child, server_dir));
+                    }
+                    eprintln!("[SERVER] Serveur pas prêt sur port {}, essai du port suivant", port);
+                    // Le processus sera nettoyé par le système
+                }
+            }
+            Err(e) => {
+                eprintln!("[SERVER] Erreur de lancement sur port {}: {}", port, e);
+            }
+        }
+    }
+
+    eprintln!("[SERVER] Impossible de lancer le serveur sur aucun port!");
+    None
 }
 
 #[derive(Clone, Serialize)]
@@ -600,26 +659,30 @@ async fn start_listening_for_requests(
         .ok_or("Fenêtre principale non trouvée")?;
 
     // Démarrer la boucle d'écoute en arrière-plan
+    // IMPORTANT: On utilise try_receive_message avec timeout court au lieu de
+    // receive_message (bloquant) pour éviter un DEADLOCK.
+    // receive_message() garde le lock session_manager pendant l'attente indéfinie,
+    // ce qui bloque accept_connection/connect_to_device qui ont besoin du même lock.
+    // Avec try_receive_message(500ms), le lock est relâché entre chaque itération.
     tauri::async_runtime::spawn(async move {
         loop {
-            // FIX DEADLOCK: Recevoir le message dans un scope séparé pour libérer le lock
+            // Recevoir le message avec timeout court pour libérer le lock régulièrement
             let msg_result = {
                 let mut session_guard = session_manager.lock().await;
                 if let Some(session) = session_guard.as_mut() {
-                    session.receive_message().await
+                    session.try_receive_message(500).await
                 } else {
                     println!("[LISTENER] Session fermée, arrêt de l'écoute");
                     return; // Sortir si session fermée
                 }
-            }; // Lock libéré ici automatiquement
+            }; // Lock libéré ici - accept_connection/connect_to_device peuvent acquérir le lock
 
             // Traiter le message après avoir libéré le lock
             match msg_result {
-                Ok(msg) => {
+                Ok(Some(msg)) => {
                     if msg.is_type("ConnectRequest") {
-                        println!("[LISTENER] ConnectRequest reçu - raw data: {:?}", msg.data);
                         if let Some(from) = msg.get_str("from") {
-                            println!("[LISTENER] Demande de connexion reçue de {}", from);
+                            println!("[LISTENER] Demande de connexion de {}", from);
 
                             // Ajouter à la liste des demandes en attente
                             let now = std::time::SystemTime::now()
@@ -639,21 +702,30 @@ async fn start_listening_for_requests(
                             requests_guard.push(request.clone());
                             drop(requests_guard); // Libérer explicitement le lock
 
-                            // Émettre un event vers l'UI
-                            if let Err(e) = window.emit("connection-request", request) {
-                                eprintln!("[TAURI] Impossible d'émettre connection-request: {}", e);
+                            // Envoyer les données à l'UI via window.eval() + DOM CustomEvent
+                            // Note: Tauri v2 window.emit() + listen() ne fonctionne pas,
+                            // donc on utilise window.eval() qui est confirmé fonctionnel.
+                            let js_code = format!(
+                                "window.dispatchEvent(new CustomEvent('ghosthand-connect-request', {{ detail: {{ from: '{}', timestamp: {} }} }}));",
+                                from, now
+                            );
+                            if let Err(e) = window.eval(&js_code) {
+                                eprintln!("[LISTENER] Erreur envoi event UI: {}", e);
                             }
                         }
                     }
                     // Les autres messages (Offer, Answer, ICE) sont gérés directement
                     // par les méthodes de SessionManager (accept_connection, connect_to_device, etc.)
                 }
+                Ok(None) => {
+                    // Timeout - pas de message, on reboucle (le lock a été relâché)
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[LISTENER] Erreur de réception: {}", e);
                     break;
                 }
             }
-            // Pas besoin de délai car receive_message() bloque déjà
         }
     });
 
