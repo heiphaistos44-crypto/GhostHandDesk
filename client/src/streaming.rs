@@ -15,6 +15,21 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
+// Diagnostic temporaire - écriture directe dans un fichier log
+fn stream_diag(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("C:\\Users\\Momo\\Documents\\GhostHandDesk\\diag.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let _ = f.write_all(format!("[{}] {}\n", ts, msg).as_bytes());
+    }
+}
+
 /// Streamer principal : capture → encode → send
 pub struct Streamer {
     capturer: Arc<Mutex<Box<dyn ScreenCapturer>>>,
@@ -82,13 +97,13 @@ impl Streamer {
                     },
                     Err(e) => {
                         error_count += 1;
+                        stream_diag(&format!("STREAMER: Erreur capture #{}: {}", error_count, e));
                         if error_count >= 5 {
-                            error!("Trop d'erreurs de capture consécutives ({}), arrêt du streaming", error_count);
+                            stream_diag("STREAMER: Trop d'erreurs, arrêt!");
                             return Err(GhostHandError::ScreenCapture(format!(
                                 "Échec après {} erreurs consécutives de capture", error_count
                             )));
                         }
-                        warn!("Erreur de capture ({}/5): {}", error_count, e);
                         continue;
                     }
                 }
@@ -121,8 +136,11 @@ impl Streamer {
                 Ok(bytes) => {
                     let webrtc_guard = self.webrtc.lock().await;
                     if let Err(e) = webrtc_guard.send_data(&bytes).await {
-                        warn!("Erreur d'envoi WebRTC: {}", e);
-                        // Ne pas arrêter, juste logger
+                        if frame_count < 5 || frame_count % 100 == 0 {
+                            stream_diag(&format!("STREAMER: send_data ERREUR frame #{}: {}", frame_count, e));
+                        }
+                    } else if frame_count < 3 || frame_count % 100 == 0 {
+                        stream_diag(&format!("STREAMER: Frame #{} envoyée ({} bytes)", frame_count, bytes.len()));
                     }
                     // webrtc_guard est drop ici automatiquement
                 }
@@ -199,21 +217,64 @@ impl Receiver {
 
         // Setup callback pour recevoir les messages du data channel
         // Le callback envoie juste les données brutes dans le canal
+        let rx_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rx_counter_clone = rx_counter.clone();
         webrtc.on_data_channel_message(move |data: &[u8]| {
+            let count = rx_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                stream_diag(&format!("RECEIVER-RAW: message #{} reçu ({} bytes)", count, data.len()));
+            }
             let _ = tx.send(data.to_vec());
         }).await?;
 
-        info!("Réception vidéo configurée");
+        stream_diag("Receiver: on_data_channel_message configuré OK");
 
         // Spawner une task pour traiter les messages du canal
+        // Avec réassemblage des chunks pour les gros messages (vidéo)
         let callback = Arc::new(frame_callback);
         tokio::spawn(async move {
+            let mut reassembly: Option<(usize, Vec<u8>)> = None; // (expected_len, buffer)
+
             while let Some(data) = rx.recv().await {
-                // Parse le message
+                // Vérifier si c'est un message fragmenté
+                if data.len() >= 2 && data[0] == 0xFF {
+                    match data[1] {
+                        0x01 if data.len() >= 6 => {
+                            // Header de fragment: [0xFF][0x01][total_len: u32 LE]
+                            let total_len = u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize;
+                            reassembly = Some((total_len, Vec::with_capacity(total_len)));
+                            continue;
+                        }
+                        0x02 => {
+                            // Chunk de données: [0xFF][0x02][data...]
+                            if let Some((expected_len, ref mut buffer)) = reassembly {
+                                buffer.extend_from_slice(&data[2..]);
+                                if buffer.len() >= expected_len {
+                                    // Réassemblage terminé — traiter le message complet
+                                    let complete_data = std::mem::take(buffer);
+                                    reassembly = None;
+                                    if let Ok(msg) = ControlMessage::from_bytes(&complete_data) {
+                                        match msg {
+                                            ControlMessage::VideoFrame { data, width, height, timestamp, .. } => {
+                                                callback(data, width, height, timestamp);
+                                            }
+                                            _ => {
+                                                debug!("Message non-vidéo (reassemblé): {:?}", msg);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {} // Pas un header de chunk, traiter normalement
+                    }
+                }
+
+                // Message normal (non fragmenté)
                 if let Ok(msg) = ControlMessage::from_bytes(&data) {
                     match msg {
                         ControlMessage::VideoFrame { data, width, height, timestamp, .. } => {
-                            // Appeler le callback avec les données de la frame
                             callback(data, width, height, timestamp);
                         }
                         _ => {

@@ -558,13 +558,38 @@ impl WebRTCConnection {
     }
 
     /// Send data over the data channel
+    /// Taille max d'un chunk WebRTC (16KB - marge pour header)
+    const MAX_CHUNK_SIZE: usize = 15 * 1024;
+
     pub async fn send_data(&self, data: &[u8]) -> Result<()> {
         let dc_lock = self.data_channel.read().await;
 
         if let Some(dc) = dc_lock.as_ref() {
-            dc.send(&Bytes::from(data.to_vec()))
-                .await
-                .map_err(|e| GhostHandError::WebRTC(format!("Erreur d'envoi de données: {}", e)))?;
+            if data.len() <= Self::MAX_CHUNK_SIZE {
+                // Message petit : envoi direct
+                dc.send(&Bytes::from(data.to_vec()))
+                    .await
+                    .map_err(|e| GhostHandError::WebRTC(format!("Erreur d'envoi de données: {}", e)))?;
+            } else {
+                // Message trop gros : fragmenter
+                // Header: [0xFF][0x01][total_len: u32 LE]
+                let mut header = vec![0xFF, 0x01];
+                header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                dc.send(&Bytes::from(header))
+                    .await
+                    .map_err(|e| GhostHandError::WebRTC(format!("Erreur envoi header chunk: {}", e)))?;
+
+                // Chunks de données: [0xFF][0x02][data...]
+                for chunk in data.chunks(Self::MAX_CHUNK_SIZE) {
+                    let mut chunk_msg = Vec::with_capacity(2 + chunk.len());
+                    chunk_msg.push(0xFF);
+                    chunk_msg.push(0x02);
+                    chunk_msg.extend_from_slice(chunk);
+                    dc.send(&Bytes::from(chunk_msg))
+                        .await
+                        .map_err(|e| GhostHandError::WebRTC(format!("Erreur envoi chunk: {}", e)))?;
+                }
+            }
             Ok(())
         } else {
             Err(GhostHandError::WebRTC("Data channel non disponible".into()))

@@ -89,7 +89,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 // Props
 interface Props {
@@ -115,11 +114,17 @@ const quality = ref('medium');
 const showQuality = ref(false);
 const isFullscreen = ref(false);
 
+// Dimensions de l'écran distant et zone de dessin réelle dans le canvas
+const remoteWidth = ref(0);
+const remoteHeight = ref(0);
+const drawRect = ref({ x: 0, y: 0, w: 0, h: 0 });
+
 // Variables de performance
 let frameCount = 0;
 let lastFpsUpdate = Date.now();
-let unlistenVideo: UnlistenFn | null = null;
 let fpsIntervalId: ReturnType<typeof setInterval> | null = null;
+let videoEventHandler: ((event: Event) => void) | null = null;
+let resizeObserver: ResizeObserver | null = null;
 
 // Lifecycle
 onMounted(async () => {
@@ -128,14 +133,32 @@ onMounted(async () => {
   // Focus sur le canvas pour les événements clavier
   canvasRef.value?.focus();
 
-  // Écouter les frames vidéo
-  try {
-    unlistenVideo = await listen<VideoFramePayload>('video-frame', (event) => {
-      handleVideoFrame(event.payload);
+  // Écouter les frames vidéo via DOM CustomEvent
+  // (window.eval() + CustomEvent car le Tauri event system ne fonctionne pas)
+  videoEventHandler = ((event: Event) => {
+    const detail = (event as CustomEvent).detail;
+    // Décoder base64 en Uint8Array
+    const binaryString = atob(detail.data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    handleVideoFrame({
+      data: Array.from(bytes),
+      width: detail.width,
+      height: detail.height,
+      timestamp: detail.timestamp,
     });
-    console.log('Listener vidéo configuré');
-  } catch (error) {
-    console.error('Erreur configuration listener:', error);
+  });
+  window.addEventListener('ghosthand-video-frame', videoEventHandler);
+  console.log('Listener vidéo configuré (CustomEvent)');
+
+  // Observer les changements de taille du container
+  if (containerRef.value) {
+    resizeObserver = new ResizeObserver(() => {
+      recalcDrawRect();
+    });
+    resizeObserver.observe(containerRef.value);
   }
 
   // Calculer FPS
@@ -143,13 +166,14 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  // Nettoyer les listeners
-  if (unlistenVideo) {
-    unlistenVideo();
+  if (videoEventHandler) {
+    window.removeEventListener('ghosthand-video-frame', videoEventHandler);
   }
-  // Nettoyer le timer FPS pour éviter une fuite mémoire
   if (fpsIntervalId) {
     clearInterval(fpsIntervalId);
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect();
   }
 });
 
@@ -166,6 +190,42 @@ const MAX_FRAME_WIDTH = 3840;  // 4K
 const MAX_FRAME_HEIGHT = 2160; // 4K
 const MAX_FRAME_DATA_SIZE = 10 * 1024 * 1024; // 10 MB
 
+// Recalculer la zone de dessin quand le container change de taille
+function recalcDrawRect() {
+  const canvas = canvasRef.value;
+  const container = containerRef.value;
+  if (!canvas || !container || !remoteWidth.value || !remoteHeight.value) return;
+
+  // Canvas interne = taille du container (pixels CSS * devicePixelRatio pour netteté)
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width = cw;
+    canvas.height = ch;
+  }
+
+  // Calculer le rect de dessin en respectant le ratio d'aspect
+  const imgAspect = remoteWidth.value / remoteHeight.value;
+  const containerAspect = cw / ch;
+
+  let dx: number, dy: number, dw: number, dh: number;
+  if (imgAspect > containerAspect) {
+    // Image plus large → fit sur la largeur, barres haut/bas
+    dw = cw;
+    dh = cw / imgAspect;
+    dx = 0;
+    dy = (ch - dh) / 2;
+  } else {
+    // Image plus haute → fit sur la hauteur, barres gauche/droite
+    dh = ch;
+    dw = ch * imgAspect;
+    dx = (cw - dw) / 2;
+    dy = 0;
+  }
+
+  drawRect.value = { x: dx, y: dy, w: dw, h: dh };
+}
+
 // Méthodes
 function handleVideoFrame(payload: VideoFramePayload) {
   const canvas = canvasRef.value;
@@ -179,8 +239,7 @@ function handleVideoFrame(payload: VideoFramePayload) {
       payload.width <= 0 || payload.height <= 0 ||
       payload.width > MAX_FRAME_WIDTH || payload.height > MAX_FRAME_HEIGHT) {
     console.error(
-      `[SÉCURITÉ] Dimensions de frame invalides ou dangereuses: ${payload.width}x${payload.height}. ` +
-      `Limites: ${MAX_FRAME_WIDTH}x${MAX_FRAME_HEIGHT}`
+      `[SÉCURITÉ] Dimensions de frame invalides: ${payload.width}x${payload.height}`
     );
     return;
   }
@@ -188,62 +247,62 @@ function handleVideoFrame(payload: VideoFramePayload) {
   // SÉCURITÉ : Valider la taille des données
   if (!payload.data || payload.data.length === 0 || payload.data.length > MAX_FRAME_DATA_SIZE) {
     console.error(
-      `[SÉCURITÉ] Taille de données invalide: ${payload.data?.length || 0} bytes. ` +
-      `Limite: ${MAX_FRAME_DATA_SIZE} bytes`
+      `[SÉCURITÉ] Taille de données invalide: ${payload.data?.length || 0} bytes`
     );
     return;
   }
 
-  // SÉCURITÉ : Vérifier que les données sont des nombres valides
   if (!Array.isArray(payload.data)) {
     console.error('[SÉCURITÉ] Format de données invalide: attendu Array');
     return;
   }
 
-  // Ajuster taille canvas si nécessaire (dimensions déjà validées)
-  if (canvas.width !== payload.width || canvas.height !== payload.height) {
-    canvas.width = payload.width;
-    canvas.height = payload.height;
+  // Mettre à jour les dimensions de l'écran distant
+  if (remoteWidth.value !== payload.width || remoteHeight.value !== payload.height) {
+    remoteWidth.value = payload.width;
+    remoteHeight.value = payload.height;
+    recalcDrawRect();
   }
 
-  // Décoder et dessiner selon le format
+  // S'assurer que le canvas est dimensionné au container
+  const container = containerRef.value;
+  if (container) {
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
+      recalcDrawRect();
+    }
+  }
+
+  // Décoder et dessiner
   try {
-    // Les données sont encodées en JPEG - créer un Blob et une Image
     const blob = new Blob([new Uint8Array(payload.data)], { type: 'image/jpeg' });
     const url = URL.createObjectURL(blob);
 
     const img = new Image();
     img.onload = () => {
-      // SÉCURITÉ : Vérifier que l'image décodée a les bonnes dimensions
-      if (img.width !== payload.width || img.height !== payload.height) {
-        console.warn(
-          `[SÉCURITÉ] Dimensions image décodée différentes: ` +
-          `attendu ${payload.width}x${payload.height}, ` +
-          `obtenu ${img.width}x${img.height}`
-        );
-      }
+      const dr = drawRect.value;
+      // Effacer le canvas (barres noires)
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Dessiner l'image dans la zone calculée (ratio préservé)
+      ctx.drawImage(img, dr.x, dr.y, dr.w, dr.h);
 
-      // Dessiner l'image sur le canvas (dimensions validées)
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      // Libérer la mémoire
       URL.revokeObjectURL(url);
 
-      // Marquer comme streaming
       if (!streaming.value) {
         streaming.value = true;
       }
 
-      // Compter frame
       frameCount++;
 
-      // Calculer latence
       const now = Date.now();
       latency.value = Math.max(0, now - payload.timestamp);
     };
 
     img.onerror = (err) => {
-      console.error('[SÉCURITÉ] Erreur chargement image (format invalide ou corrompu):', err);
+      console.error('[SÉCURITÉ] Erreur chargement image:', err);
       URL.revokeObjectURL(url);
     };
 
@@ -263,20 +322,51 @@ function updateFps() {
   lastFpsUpdate = now;
 }
 
-// Gestion événements souris
-async function handleMouseDown(event: MouseEvent) {
+// Convertir les coordonnées canvas CSS → coordonnées écran distant
+function canvasToRemote(event: MouseEvent): { x: number; y: number } | null {
   const canvas = canvasRef.value;
-  if (!canvas) return;
+  if (!canvas || !remoteWidth.value || !remoteHeight.value) return null;
 
   const rect = canvas.getBoundingClientRect();
-  const x = Math.round((event.clientX - rect.left) * (canvas.width / rect.width));
-  const y = Math.round((event.clientY - rect.top) * (canvas.height / rect.height));
+  const dr = drawRect.value;
+
+  // Position dans le canvas en pixels CSS
+  const cssX = event.clientX - rect.left;
+  const cssY = event.clientY - rect.top;
+
+  // Ratio CSS → pixels internes du canvas
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+
+  // Position dans le canvas en pixels internes
+  const canvasX = cssX * scaleX;
+  const canvasY = cssY * scaleY;
+
+  // Position relative à la zone de dessin de l'image (0..1)
+  const relX = (canvasX - dr.x) / dr.w;
+  const relY = (canvasY - dr.y) / dr.h;
+
+  // Clamper dans [0, 1] pour rester dans la zone image
+  const clampedX = Math.max(0, Math.min(1, relX));
+  const clampedY = Math.max(0, Math.min(1, relY));
+
+  // Convertir en coordonnées de l'écran distant
+  return {
+    x: Math.round(clampedX * remoteWidth.value),
+    y: Math.round(clampedY * remoteHeight.value),
+  };
+}
+
+// Gestion événements souris
+async function handleMouseDown(event: MouseEvent) {
+  const coords = canvasToRemote(event);
+  if (!coords) return;
 
   try {
     await invoke('send_mouse_event', {
       event: {
-        x,
-        y,
+        x: coords.x,
+        y: coords.y,
         button: event.button === 0 ? 'left' : event.button === 2 ? 'right' : 'middle',
         type: 'down',
       },
@@ -287,18 +377,14 @@ async function handleMouseDown(event: MouseEvent) {
 }
 
 async function handleMouseUp(event: MouseEvent) {
-  const canvas = canvasRef.value;
-  if (!canvas) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const x = Math.round((event.clientX - rect.left) * (canvas.width / rect.width));
-  const y = Math.round((event.clientY - rect.top) * (canvas.height / rect.height));
+  const coords = canvasToRemote(event);
+  if (!coords) return;
 
   try {
     await invoke('send_mouse_event', {
       event: {
-        x,
-        y,
+        x: coords.x,
+        y: coords.y,
         button: event.button === 0 ? 'left' : event.button === 2 ? 'right' : 'middle',
         type: 'up',
       },
@@ -309,18 +395,14 @@ async function handleMouseUp(event: MouseEvent) {
 }
 
 async function handleMouseMove(event: MouseEvent) {
-  const canvas = canvasRef.value;
-  if (!canvas) return;
-
-  const rect = canvas.getBoundingClientRect();
-  const x = Math.round((event.clientX - rect.left) * (canvas.width / rect.width));
-  const y = Math.round((event.clientY - rect.top) * (canvas.height / rect.height));
+  const coords = canvasToRemote(event);
+  if (!coords) return;
 
   try {
     await invoke('send_mouse_event', {
       event: {
-        x,
-        y,
+        x: coords.x,
+        y: coords.y,
         button: 'none',
         type: 'move',
       },
@@ -619,8 +701,7 @@ async function updateQuality() {
 .stream-canvas {
   width: 100%;
   height: 100%;
-  object-fit: contain;
-  cursor: crosshair;
+  cursor: default;
 }
 
 .stream-canvas:focus {

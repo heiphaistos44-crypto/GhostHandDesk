@@ -4,7 +4,7 @@ mod storage_commands;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{Emitter, Manager, State, AppHandle};
+use tauri::{Manager, State, AppHandle};
 use tokio::sync::Mutex;
 use ghost_hand_client::audit::{audit_log, init_global_logger, AuditEvent, AuditLevel};
 use ghost_hand_client::config::{Config, VideoCodec};
@@ -14,6 +14,24 @@ use ghost_hand_client::storage::{global_storage, init_global_storage, Connection
 use ghost_hand_client::streaming::{Streamer, Receiver, InputHandler};
 use ghost_hand_client::screen_capture;
 use ghost_hand_client::video_encoder;
+use base64::Engine;
+
+// Fonction de diagnostic - écrit dans un fichier log
+fn diag_log(msg: &str) {
+    use std::io::Write;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let line = format!("[{}] {}\n", timestamp, msg);
+    eprintln!("{}", line.trim());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("C:\\Users\\Momo\\Documents\\GhostHandDesk\\diag.log")
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
 
 // Serveur de signalement embarqué dans le binaire
 const EMBEDDED_SERVER: &[u8] = include_bytes!("../../../server/signaling-server.exe");
@@ -106,7 +124,7 @@ fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> 
         match std::process::Command::new(&server_path)
             .env("REQUIRE_TLS", "false")
             .env("DISABLE_ORIGIN_CHECK", "true")
-            .env("PORT", port.to_string())
+            .env("SERVER_HOST", format!(":{}", port))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -156,15 +174,6 @@ struct AppState {
     config: Arc<Mutex<Config>>,
     pending_requests: Arc<Mutex<Vec<ConnectionRequest>>>,
     streamer_handle: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
-}
-
-#[derive(Clone, Serialize)]
-#[allow(dead_code)]
-struct VideoFramePayload {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
-    timestamp: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +263,37 @@ async fn initialize_session(
     Ok(())
 }
 
+/// Récupérer les infos réseau (IP locale + port serveur)
+#[tauri::command]
+async fn get_network_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let config = state.config.lock().await;
+    let server_url = config.server_url.clone();
+
+    // Trouver l'IP locale
+    let local_ip = get_local_ip().unwrap_or_else(|| "inconnu".to_string());
+
+    // Extraire le port du server_url
+    let port = server_url
+        .split(':')
+        .last()
+        .and_then(|s| s.split('/').next())
+        .unwrap_or("9000");
+
+    Ok(serde_json::json!({
+        "local_ip": local_ip,
+        "port": port,
+        "server_url": server_url,
+    }))
+}
+
+/// Trouver l'IP locale de la machine
+fn get_local_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
+}
+
 /// Se connecter à un appareil distant
 #[tauri::command]
 async fn connect_to_device(
@@ -261,9 +301,10 @@ async fn connect_to_device(
     target_id: String,
     password: Option<String>,
 ) -> Result<(), String> {
-    println!("[TAURI] Connexion à {} demandée", target_id);
+    diag_log(&format!("connect_to_device: APPELÉ pour {}", target_id));
 
     let mut session_guard = state.session_manager.lock().await;
+    diag_log("connect_to_device: lock acquis");
 
     // S'assurer qu'on a un SessionManager
     if session_guard.is_none() {
@@ -278,7 +319,7 @@ async fn connect_to_device(
         .await
         .map_err(|e| format!("Erreur de connexion: {}", e))?;
 
-    println!("[TAURI] Connexion WebRTC établie avec {}", target_id);
+    diag_log(&format!("connect_to_device: WebRTC établi avec {}", target_id));
 
     // Enregistrer dans l'historique
     if let Some(storage_mutex) = global_storage() {
@@ -440,23 +481,72 @@ async fn update_config(
     Ok(())
 }
 
+/// Changer l'URL du serveur de signalement et réinitialiser la session
+#[tauri::command]
+async fn update_server_url(
+    state: State<'_, AppState>,
+    server_url: String,
+) -> Result<(), String> {
+    diag_log(&format!("update_server_url: {} ", server_url));
+
+    // 1. Mettre à jour la config
+    {
+        let mut config = state.config.lock().await;
+        config.server_url = server_url.clone();
+    }
+
+    // 2. Détruire l'ancienne session (ferme le WebSocket)
+    {
+        *state.session_manager.lock().await = None;
+    }
+
+    // 3. Créer une nouvelle session avec la nouvelle URL
+    let config = state.config.lock().await.clone();
+    let device_id = state.device_id.clone();
+
+    let mut session = SessionManager::new(config, device_id);
+    session
+        .initialize()
+        .await
+        .map_err(|e| format!("Impossible de se connecter au serveur {}: {}", server_url, e))?;
+
+    *state.session_manager.lock().await = Some(session);
+
+    diag_log(&format!("update_server_url: session réinitialisée sur {}", server_url));
+    Ok(())
+}
+
 /// Démarrer le streaming vidéo (côté contrôlé)
 #[tauri::command]
 async fn start_streaming(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
-    println!("[TAURI] Démarrage du streaming vidéo");
+    diag_log("start_streaming: APPELÉ");
 
     let session_guard = state.session_manager.lock().await;
 
     if let Some(session) = session_guard.as_ref() {
         if let Some(webrtc) = &session.webrtc {
+            // Vérifier l'état du data channel avant de démarrer
+            let dc_test = webrtc.send_data(b"test").await;
+            diag_log(&format!("start_streaming: data_channel test = {:?}", dc_test.is_ok()));
+            if let Err(ref e) = dc_test {
+                diag_log(&format!("start_streaming: data_channel ERREUR: {}", e));
+                // Notifier l'UI
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.eval(&format!("alert('STREAMING: Data channel non prêt: {}');", e));
+                }
+            }
+
             // Créer capturer et encoder
             let capturer = screen_capture::create_capturer()
-                .map_err(|e| format!("Erreur capturer: {}", e))?;
+                .map_err(|e| { diag_log(&format!("Erreur capturer: {}", e)); format!("Erreur capturer: {}", e) })?;
             let encoder = video_encoder::create_encoder(
                 VideoCodec::H264, 1920, 1080, 30, 4000
-            ).map_err(|e| format!("Erreur encoder: {}", e))?;
+            ).map_err(|e| { diag_log(&format!("Erreur encoder: {}", e)); format!("Erreur encoder: {}", e) })?;
+
+            diag_log("start_streaming: capturer + encoder OK");
 
             // Créer streamer
             let streamer = Streamer::new(
@@ -468,21 +558,25 @@ async fn start_streaming(
 
             // Lancer dans un task local et stocker le handle
             let handle = tauri::async_runtime::spawn(async move {
+                diag_log("streaming task: DÉMARRÉ");
                 if let Err(e) = streamer.start().await {
-                    eprintln!("[STREAMING] Erreur: {}", e);
+                    diag_log(&format!("streaming task: ERREUR: {}", e));
                 }
+                diag_log("streaming task: TERMINÉ");
             });
 
             // Stocker le handle pour pouvoir arrêter le streaming plus tard
             drop(session_guard); // Libérer le lock avant de prendre streamer_handle
             *state.streamer_handle.lock().await = Some(handle);
 
-            println!("[TAURI] Streaming démarré");
+            diag_log("start_streaming: handle stocké, OK");
             Ok(())
         } else {
+            diag_log("start_streaming: ERREUR - Pas de connexion WebRTC");
             Err("Pas de connexion WebRTC".to_string())
         }
     } else {
+        diag_log("start_streaming: ERREUR - Non connecté");
         Err("Non connecté".to_string())
     }
 }
@@ -507,7 +601,7 @@ async fn start_receiving(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    println!("[TAURI] Démarrage de la réception vidéo");
+    diag_log("start_receiving: APPELÉ");
 
     let session_guard = state.session_manager.lock().await;
 
@@ -517,29 +611,45 @@ async fn start_receiving(
             let window = app_handle.get_webview_window("main")
                 .ok_or("Fenêtre non trouvée")?;
 
+            diag_log("start_receiving: fenêtre + webrtc OK");
+
             // Créer receiver
             let receiver = Arc::new(Receiver::new(webrtc.clone()));
 
             // Démarrer avec callback pour émettre les frames à l'UI
+            let frame_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let frame_counter_clone = frame_counter.clone();
             receiver.start(move |data, width, height, timestamp| {
-                // Émettre l'événement à l'UI
-                if let Err(e) = window.emit("video-frame", VideoFramePayload {
-                    data,
-                    width,
-                    height,
-                    timestamp,
-                }) {
-                    eprintln!("[TAURI] Impossible d'émettre video-frame: {}", e);
+                let count = frame_counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count < 3 {
+                    diag_log(&format!("RECEIVER: Frame #{} reçue: {}x{} ({} bytes)", count, width, height, data.len()));
+                }
+                if count == 0 {
+                    // Première frame - alerte pour confirmer
+                    let _ = window.eval("document.title = 'FRAME REÇUE!';");
+                }
+                let b64_data = base64::engine::general_purpose::STANDARD.encode(&data);
+                let js_code = format!(
+                    "window.dispatchEvent(new CustomEvent('ghosthand-video-frame', {{ detail: {{ data: '{}', width: {}, height: {}, timestamp: {} }} }}));",
+                    b64_data, width, height, timestamp
+                );
+                if let Err(e) = window.eval(&js_code) {
+                    diag_log(&format!("RECEIVER: eval erreur: {}", e));
                 }
             }).await
-                .map_err(|e| format!("Erreur receiver: {}", e))?;
+                .map_err(|e| {
+                    diag_log(&format!("start_receiving: ERREUR receiver.start: {}", e));
+                    format!("Erreur receiver: {}", e)
+                })?;
 
-            println!("[TAURI] Réception démarrée");
+            diag_log("start_receiving: OK");
             Ok(())
         } else {
+            diag_log("start_receiving: ERREUR - Pas de connexion WebRTC");
             Err("Pas de connexion WebRTC".to_string())
         }
     } else {
+        diag_log("start_receiving: ERREUR - Non connecté");
         Err("Non connecté".to_string())
     }
 }
@@ -579,9 +689,10 @@ async fn accept_connection(
     state: State<'_, AppState>,
     from: String,
 ) -> Result<(), String> {
-    println!("[TAURI] Acceptation de la connexion de {}", from);
+    diag_log(&format!("accept_connection: APPELÉ pour {}", from));
 
     let mut session_guard = state.session_manager.lock().await;
+    diag_log("accept_connection: lock acquis");
 
     if let Some(session) = session_guard.as_mut() {
         session.accept_connection(from.clone()).await
@@ -591,7 +702,7 @@ async fn accept_connection(
         let mut requests = state.pending_requests.lock().await;
         requests.retain(|r| r.from != from);
 
-        println!("[TAURI] Connexion acceptée de {}", from);
+        diag_log(&format!("accept_connection: WebRTC accepté de {}", from));
 
         // Auto-démarrer le streaming et l'input handler
         if let Some(session) = session_guard.as_ref() {
@@ -734,6 +845,8 @@ async fn start_listening_for_requests(
 }
 
 fn main() {
+    diag_log("=== APPLICATION DÉMARRÉE ===");
+
     // Lancer le serveur de signalement embarqué
     let server_process: Arc<std::sync::Mutex<Option<(std::process::Child, std::path::PathBuf)>>> =
         Arc::new(std::sync::Mutex::new(start_embedded_server()));
@@ -813,6 +926,7 @@ fn main() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             get_device_id,
+            get_network_info,
             initialize_session,
             connect_to_device,
             disconnect,
@@ -820,6 +934,7 @@ fn main() {
             send_keyboard_event,
             get_config,
             update_config,
+            update_server_url,
             start_streaming,
             stop_streaming,
             start_receiving,

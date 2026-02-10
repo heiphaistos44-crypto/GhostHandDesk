@@ -7,6 +7,50 @@
       </div>
 
       <form @submit.prevent="handleSubmit" class="connect-form">
+        <!-- Server URL (collapsible) -->
+        <div class="form-group server-group">
+          <div class="server-header" @click="showServerUrl = !showServerUrl">
+            <label>Serveur de signalement</label>
+            <span class="server-toggle">{{ showServerUrl ? '▲' : '▼' }}</span>
+          </div>
+          <div v-if="showServerUrl" class="server-content">
+            <div class="server-current">
+              <span class="server-status" :class="serverConnected ? 'server-ok' : 'server-err'"></span>
+              <span class="server-url-label">{{ currentServerUrl || 'Non configuré' }}</span>
+            </div>
+            <input
+              v-model="serverUrl"
+              type="text"
+              placeholder="ws://192.168.1.x:9000/ws"
+              class="form-input server-input"
+              :disabled="connecting || changingServer"
+            />
+            <div class="server-actions">
+              <button
+                type="button"
+                class="server-apply-btn"
+                :disabled="!serverUrl || serverUrl === currentServerUrl || connecting || changingServer"
+                @click="handleChangeServer"
+              >
+                <span v-if="!changingServer">Appliquer</span>
+                <span v-else class="connecting-text">
+                  <span class="spinner small"></span>
+                  Reconnexion...
+                </span>
+              </button>
+              <button
+                type="button"
+                class="server-reset-btn"
+                @click="serverUrl = 'ws://localhost:9000/ws'"
+                :disabled="connecting || changingServer"
+              >
+                Reset
+              </button>
+            </div>
+            <span class="input-hint">Pour contrôler un PC distant, entrez l'IP de la machine qui héberge le serveur (visible dans son header)</span>
+          </div>
+        </div>
+
         <!-- Device ID Input -->
         <div class="form-group">
           <label for="target-id">Device ID de la cible</label>
@@ -39,9 +83,9 @@
         </div>
 
         <!-- Error message -->
-        <div v-if="error" class="error-message">
+        <div v-if="error || serverError" class="error-message">
           <span class="error-icon">⚠️</span>
-          <span>{{ error }}</span>
+          <span>{{ error || serverError }}</span>
         </div>
 
         <!-- Connect Button -->
@@ -86,33 +130,78 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 
 // Props
 interface Props {
   connecting?: boolean;
   error?: string;
+  initialServerUrl?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   connecting: false,
   error: '',
+  initialServerUrl: '',
 });
 
 // Emits
 const emit = defineEmits<{
   connect: [targetId: string, password: string | null];
+  serverChanged: [serverUrl: string];
 }>();
 
 // État local
 const targetId = ref('');
 const password = ref('');
+const showServerUrl = ref(false);
+const serverUrl = ref('');
+const currentServerUrl = ref('');
+const serverConnected = ref(true);
+const changingServer = ref(false);
+const serverError = ref('');
+
+// Charger l'URL du serveur actuel au montage
+onMounted(async () => {
+  try {
+    const info = await invoke<any>('get_network_info');
+    currentServerUrl.value = info.server_url || 'ws://localhost:9000/ws';
+    serverUrl.value = currentServerUrl.value;
+  } catch (e) {
+    console.error('Erreur chargement info serveur:', e);
+    currentServerUrl.value = 'ws://localhost:9000/ws';
+    serverUrl.value = currentServerUrl.value;
+  }
+});
 
 // Méthodes
 function handleSubmit() {
   if (!targetId.value.trim()) return;
-
   emit('connect', targetId.value.trim(), password.value.trim() || null);
+}
+
+async function handleChangeServer() {
+  if (!serverUrl.value.trim()) return;
+
+  changingServer.value = true;
+  serverError.value = '';
+
+  try {
+    // Mettre à jour l'URL du serveur et réinitialiser la session
+    await invoke('update_server_url', { serverUrl: serverUrl.value.trim() });
+
+    currentServerUrl.value = serverUrl.value.trim();
+    serverConnected.value = true;
+    emit('serverChanged', currentServerUrl.value);
+    console.log('[ConnectDialog] Serveur changé:', currentServerUrl.value);
+  } catch (e: any) {
+    console.error('Erreur changement serveur:', e);
+    serverError.value = e.message || e || 'Impossible de se connecter au serveur';
+    serverConnected.value = false;
+  } finally {
+    changingServer.value = false;
+  }
 }
 
 function showHelp() {
@@ -120,7 +209,6 @@ function showHelp() {
 }
 
 function openSettings() {
-  // TODO: Émettre un événement pour ouvrir les settings
   console.log('Ouvrir les paramètres');
 }
 
@@ -282,6 +370,124 @@ function showAbout() {
   border-radius: 6px;
   font-size: 13px;
   color: #9d9d9d;
+}
+
+/* Server URL section */
+.server-group {
+  background: #2d2d30;
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid #3e3e42;
+}
+
+.server-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.server-header label {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #ccc;
+}
+
+.server-toggle {
+  font-size: 10px;
+  color: #888;
+}
+
+.server-content {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.server-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #999;
+}
+
+.server-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.server-status.server-ok {
+  background: #4ec9b0;
+}
+
+.server-status.server-err {
+  background: #f44;
+}
+
+.server-url-label {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.server-input {
+  font-size: 13px !important;
+  padding: 8px 12px !important;
+}
+
+.server-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.server-apply-btn {
+  flex: 1;
+  padding: 8px 12px;
+  background: #0e639c;
+  border: none;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.server-apply-btn:hover:not(:disabled) {
+  background: #1177bb;
+}
+
+.server-apply-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.server-reset-btn {
+  padding: 8px 12px;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #ccc;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.server-reset-btn:hover:not(:disabled) {
+  background: #4c4c4c;
+}
+
+.server-reset-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spinner.small {
+  width: 12px;
+  height: 12px;
 }
 
 /* Quick Actions */

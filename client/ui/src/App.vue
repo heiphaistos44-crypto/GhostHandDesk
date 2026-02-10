@@ -18,6 +18,10 @@
             📋
           </button>
         </div>
+        <div v-if="networkInfo.local_ip" class="network-info">
+          <span class="label">IP:</span>
+          <code class="network-ip">{{ networkInfo.local_ip }}:{{ networkInfo.port }}</code>
+        </div>
       </div>
       <div class="header-right">
         <div class="connection-status" :class="statusClass">
@@ -40,16 +44,29 @@
       <ConnectDialog
         v-if="!connected"
         @connect="handleConnect"
+        @server-changed="handleServerChanged"
         :connecting="connecting"
         :error="connectionError"
       />
 
-      <!-- Remote Viewer (connecté) -->
+      <!-- Remote Viewer (contrôleur - celui qui a initié la connexion) -->
       <RemoteViewer
-        v-else
+        v-else-if="!isControlled"
         :connection-id="connectedTo"
         @disconnect="handleDisconnect"
       />
+
+      <!-- Écran "contrôlé" (celui qui a accepté la connexion) -->
+      <div v-else class="controlled-overlay">
+        <div class="controlled-content">
+          <div class="controlled-icon">🖥️</div>
+          <h2>Session de contrôle active</h2>
+          <p><code>{{ connectedTo }}</code> contrôle cet appareil</p>
+          <button @click="handleDisconnect" class="disconnect-btn-large">
+            Arrêter le partage
+          </button>
+        </div>
+      </div>
     </main>
 
     <!-- Settings Panel (overlay) -->
@@ -92,6 +109,12 @@ const connectedTo = ref<string>('');
 const connectionError = ref<string>('');
 const settingsOpen = ref(false);
 const showSettings = ref(true);
+const isControlled = ref(false);
+const networkInfo = ref<{local_ip: string; port: string; server_url: string}>({
+  local_ip: '',
+  port: '9000',
+  server_url: '',
+});
 
 // États pour la popup de demande de connexion
 const connectionRequestVisible = ref(false);
@@ -118,6 +141,13 @@ onMounted(async () => {
   try {
     // Récupérer le Device ID depuis le backend Rust
     deviceId.value = await invoke<string>('get_device_id');
+
+    // Récupérer les infos réseau
+    try {
+      networkInfo.value = await invoke<any>('get_network_info');
+    } catch (e) {
+      console.error('Erreur récupération infos réseau:', e);
+    }
 
     // Initialiser la session au démarrage
     await invoke('initialize_session');
@@ -182,6 +212,7 @@ async function handleAcceptRequest() {
 
     connected.value = true;
     connectedTo.value = pendingRequest.value.from;
+    isControlled.value = true;
 
     // Auto-démarrer le streaming et l'input handler
     try {
@@ -218,6 +249,7 @@ async function handleDisconnect() {
     await invoke('disconnect');
     connected.value = false;
     connectedTo.value = '';
+    isControlled.value = false;
   } catch (error) {
     console.error('Erreur de déconnexion:', error);
   }
@@ -227,6 +259,25 @@ function copyDeviceId() {
   if (deviceId.value) {
     navigator.clipboard.writeText(deviceId.value);
     // Optionnel: afficher une notification
+  }
+}
+
+async function handleServerChanged(serverUrl: string) {
+  console.log('[APP] Serveur changé:', serverUrl);
+
+  // Mettre à jour l'affichage réseau
+  try {
+    networkInfo.value = await invoke<any>('get_network_info');
+  } catch (e) {
+    console.error('Erreur récupération infos réseau:', e);
+  }
+
+  // Relancer l'écoute des demandes de connexion sur le nouveau serveur
+  try {
+    await invoke('start_listening_for_requests');
+    console.log('[APP] Listener relancé sur nouveau serveur');
+  } catch (e) {
+    console.error('Erreur relance listener:', e);
   }
 }
 
@@ -391,5 +442,59 @@ async function handleSettingsUpdate(settings: any) {
   flex: 1;
   overflow: hidden;
   position: relative;
+}
+
+/* Écran contrôlé */
+.controlled-overlay {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+.controlled-content {
+  text-align: center;
+  color: #ccc;
+}
+
+.controlled-icon {
+  font-size: 64px;
+  margin-bottom: 20px;
+}
+
+.controlled-content h2 {
+  font-size: 22px;
+  margin-bottom: 10px;
+  color: #4ec9b0;
+}
+
+.controlled-content p {
+  font-size: 14px;
+  color: #999;
+  margin-bottom: 30px;
+}
+
+.controlled-content code {
+  color: #4ec9b0;
+  font-family: monospace;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.disconnect-btn-large {
+  padding: 12px 30px;
+  background: #c44;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.disconnect-btn-large:hover {
+  background: #e55;
 }
 </style>
