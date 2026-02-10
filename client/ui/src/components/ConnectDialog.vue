@@ -109,18 +109,27 @@
           <span>{{ error || serverError }}</span>
         </div>
 
-        <!-- Connect Button -->
-        <button
-          type="submit"
-          class="connect-btn"
-          :disabled="!targetId || connecting"
-        >
-          <span v-if="!connecting">Se connecter</span>
-          <span v-else class="connecting-text">
-            <span class="spinner"></span>
-            Connexion en cours...
-          </span>
-        </button>
+        <!-- Connect / Cancel Buttons -->
+        <div v-if="!connecting" class="connect-actions">
+          <button
+            type="submit"
+            class="connect-btn"
+            :disabled="!targetId"
+          >
+            Se connecter
+          </button>
+        </div>
+        <div v-else class="connect-actions connecting-actions">
+          <button type="button" class="connect-btn connecting" disabled>
+            <span class="connecting-text">
+              <span class="spinner"></span>
+              Connexion en cours...
+            </span>
+          </button>
+          <button type="button" class="cancel-btn" @click="emit('cancel')">
+            Annuler
+          </button>
+        </div>
 
         <!-- Help text -->
         <div class="help-text">
@@ -171,6 +180,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   connect: [targetId: string, password: string | null];
   serverChanged: [serverUrl: string];
+  cancel: [];
 }>();
 
 // État local
@@ -255,25 +265,37 @@ onUnmounted(() => {
 });
 
 async function connectToPeer(peer: DiscoveredPeer) {
-  // Auto-configurer le serveur URL vers le peer découvert
-  const peerServerUrl = `ws://${peer.ip}:${peer.port}/ws`;
-  if (peerServerUrl !== currentServerUrl.value) {
-    changingServer.value = true;
-    serverError.value = '';
-    try {
-      await invoke('update_server_url', { serverUrl: peerServerUrl });
-      currentServerUrl.value = peerServerUrl;
-      serverUrl.value = peerServerUrl;
-      serverConnected.value = true;
-      emit('serverChanged', peerServerUrl);
-    } catch (e: any) {
-      serverError.value = e.message || e || 'Impossible de se connecter';
-      serverConnected.value = false;
+  // Vérifier si le peer est sur la même machine (même IP locale)
+  let localIp = '';
+  try {
+    const info = await invoke<any>('get_network_info');
+    localIp = info.local_ip || '';
+  } catch (e) {}
+
+  const isSameMachine = peer.ip === localIp || peer.ip === '127.0.0.1';
+
+  // Changer le serveur URL seulement si le peer est sur une AUTRE machine
+  if (!isSameMachine) {
+    const peerServerUrl = `ws://${peer.ip}:${peer.port}/ws`;
+    if (peerServerUrl !== currentServerUrl.value) {
+      changingServer.value = true;
+      serverError.value = '';
+      try {
+        await invoke('update_server_url', { serverUrl: peerServerUrl });
+        currentServerUrl.value = peerServerUrl;
+        serverUrl.value = peerServerUrl;
+        serverConnected.value = true;
+        emit('serverChanged', peerServerUrl);
+      } catch (e: any) {
+        serverError.value = e.message || e || 'Impossible de se connecter';
+        serverConnected.value = false;
+        changingServer.value = false;
+        return;
+      }
       changingServer.value = false;
-      return;
     }
-    changingServer.value = false;
   }
+
   // Lancer la connexion vers le device
   emit('connect', peer.device_id, null);
 }
@@ -415,6 +437,37 @@ function showAbout() {
 .connect-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.connect-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.connecting-actions {
+  gap: 10px;
+}
+
+.connect-btn.connecting {
+  opacity: 0.7;
+}
+
+.cancel-btn {
+  padding: 12px;
+  background: transparent;
+  border: 1px solid #c44;
+  border-radius: 6px;
+  color: #f88;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.cancel-btn:hover {
+  background: #c44;
+  color: #fff;
 }
 
 .connecting-text {

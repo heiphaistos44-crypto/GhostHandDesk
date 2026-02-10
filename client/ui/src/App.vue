@@ -44,6 +44,7 @@
       <ConnectDialog
         v-if="!connected"
         @connect="handleConnect"
+        @cancel="handleCancelConnect"
         @server-changed="handleServerChanged"
         :connecting="connecting"
         :error="connectionError"
@@ -261,6 +262,17 @@ async function handleConnect(targetId: string, password: string | null) {
     connected.value = false;
   } finally {
     connecting.value = false;
+  }
+}
+
+async function handleCancelConnect() {
+  console.log('[APP] Annulation de la connexion');
+  connecting.value = false;
+  connectionError.value = '';
+  try {
+    await invoke('disconnect');
+  } catch (e) {
+    // Silencieux - la session était peut-être déjà fermée
   }
 }
 

@@ -429,12 +429,16 @@ async fn connect_to_device(
     let session = session_guard.as_mut().unwrap();
 
     // Connecter au device cible
-    session
-        .connect_to_device(target_id.clone(), password)
-        .await
-        .map_err(|e| format!("Erreur de connexion: {}", e))?;
-
-    diag_log(&format!("connect_to_device: WebRTC établi avec {}", target_id));
+    diag_log(&format!("connect_to_device: appel session.connect_to_device({})...", target_id));
+    match session.connect_to_device(target_id.clone(), password).await {
+        Ok(_) => {
+            diag_log(&format!("connect_to_device: WebRTC établi avec {}", target_id));
+        }
+        Err(e) => {
+            diag_log(&format!("connect_to_device: ERREUR: {}", e));
+            return Err(format!("Erreur de connexion: {}", e));
+        }
+    }
 
     // Enregistrer dans l'historique
     if let Some(storage_mutex) = global_storage() {
