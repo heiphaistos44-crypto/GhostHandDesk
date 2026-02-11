@@ -94,6 +94,10 @@ pub enum ControlMessage {
     SelectDisplay {
         display_id: u32,
     },
+    /// Changer la résolution de streaming (width=0 → natif, sinon downscale à cette largeur)
+    SetResolution {
+        width: u32,
+    },
     DisplayListResponse {
         displays: Vec<DisplayInfoProto>,
     },

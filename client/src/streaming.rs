@@ -83,6 +83,11 @@ impl Streamer {
         self.capturer.clone()
     }
 
+    /// Obtenir une référence partagée à l'encodeur (pour changer la résolution en live)
+    pub fn encoder(&self) -> Arc<Mutex<Box<dyn VideoEncoder>>> {
+        self.encoder.clone()
+    }
+
     /// Démarrer le streaming
     pub async fn start(&self) -> Result<()> {
         info!("Démarrage du streaming vidéo à {} FPS", self.framerate);

@@ -17,7 +17,7 @@ use ghost_hand_client::protocol::{ControlMessage, DisplayInfoProto};
 use ghost_hand_client::storage::{global_storage, init_global_storage, ConnectionHistory};
 use ghost_hand_client::streaming::{Streamer, Receiver, InputHandler};
 use ghost_hand_client::screen_capture::{self, ScreenCapturer};
-use ghost_hand_client::video_encoder;
+use ghost_hand_client::video_encoder::{self, VideoEncoder};
 use base64::Engine;
 // Fonction de diagnostic - écrit dans un fichier log
 fn diag_log(msg: &str) {
@@ -191,6 +191,7 @@ struct AppState {
     clipboard_manager: Arc<std::sync::Mutex<ClipboardManager>>,
     file_transfer_manager: Arc<Mutex<FileTransferManager>>,
     active_capturer: Arc<Mutex<Option<Arc<Mutex<Box<dyn ScreenCapturer>>>>>>,
+    active_encoder: Arc<Mutex<Option<Arc<Mutex<Box<dyn VideoEncoder>>>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -693,6 +694,10 @@ async fn start_streaming(
             let shared_capturer = streamer.capturer();
             *state.active_capturer.lock().await = Some(shared_capturer.clone());
 
+            // Stocker l'encodeur partagé pour le changement de résolution en live
+            let shared_encoder = streamer.encoder();
+            *state.active_encoder.lock().await = Some(shared_encoder.clone());
+
             // Envoyer la liste d'écrans au viewer distant
             {
                 let cap = shared_capturer.lock().await;
@@ -898,6 +903,7 @@ async fn start_input_handler(
 
             let handler_clone = handler.clone();
             let capturer_ref = state.active_capturer.clone();
+            let encoder_ref = state.active_encoder.clone();
 
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
@@ -912,6 +918,16 @@ async fn start_input_handler(
                                         Ok(_) => println!("[INPUT] Moniteur switché → {}", display_id),
                                         Err(e) => println!("[INPUT] Erreur switch moniteur: {}", e),
                                     }
+                                }
+                            }
+                            ControlMessage::SetResolution { width } => {
+                                // Changer la résolution de streaming en live
+                                let enc_opt = encoder_ref.lock().await;
+                                if let Some(ref enc) = *enc_opt {
+                                    let mut enc_guard = enc.lock().await;
+                                    let target = if width == 0 { None } else { Some(width) };
+                                    enc_guard.set_target_width(target);
+                                    println!("[INPUT] Résolution changée → {:?}", target);
                                 }
                             }
                             other => {
@@ -1180,6 +1196,28 @@ async fn change_display(
     }
 }
 
+/// Changer la résolution de streaming (côté viewer → envoie au PC contrôlé)
+#[tauri::command]
+async fn change_resolution(
+    state: State<'_, AppState>,
+    width: u32,
+) -> Result<(), String> {
+    let session_guard = state.session_manager.lock().await;
+    if let Some(session) = session_guard.as_ref() {
+        if let Some(webrtc) = &session.webrtc {
+            let msg = ControlMessage::SetResolution { width };
+            let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
+            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            println!("[TAURI] SetResolution envoyé: {}", width);
+            Ok(())
+        } else {
+            Err("Pas de connexion WebRTC".to_string())
+        }
+    } else {
+        Err("Non connecté".to_string())
+    }
+}
+
 /// Récupérer la liste des écrans disponibles (locaux)
 #[tauri::command]
 fn get_displays() -> Result<Vec<serde_json::Value>, String> {
@@ -1337,6 +1375,7 @@ fn main() {
         clipboard_manager: Arc::new(std::sync::Mutex::new(ClipboardManager::new())),
         file_transfer_manager: Arc::new(Mutex::new(FileTransferManager::new())),
         active_capturer: Arc::new(Mutex::new(None)),
+        active_encoder: Arc::new(Mutex::new(None)),
     };
 
     // Cloner pour les closures
@@ -1376,6 +1415,8 @@ fn main() {
             // Multi-monitor
             get_displays,
             change_display,
+            // Resolution
+            change_resolution,
             // File transfer
             send_file,
             // Storage commands

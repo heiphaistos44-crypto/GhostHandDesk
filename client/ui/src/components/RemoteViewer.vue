@@ -28,6 +28,12 @@
             {{ d.name || ('Ecran ' + (d.id + 1)) }} ({{ d.width }}x{{ d.height }})
           </option>
         </select>
+        <!-- Resolution selector -->
+        <select v-model="selectedResolution" @change="changeResolution" class="display-select" title="Résolution streaming">
+          <option v-for="r in availableResolutions" :key="r.value" :value="r.value">
+            {{ r.label }}
+          </option>
+        </select>
         <button @click="handleSyncClipboard" class="toolbar-btn" title="Sync presse-papiers">
           <span>📋</span>
         </button>
@@ -110,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import ChatPanel from './ChatPanel.vue';
 
@@ -157,6 +163,23 @@ interface DisplayInfo {
 }
 const displays = ref<DisplayInfo[]>([]);
 const selectedDisplay = ref(0);
+
+// Résolution de streaming
+const selectedResolution = ref(1280); // Default 720p
+const allResolutions = [
+  { label: '720p', value: 1280 },
+  { label: '1080p', value: 1920 },
+  { label: '1440p', value: 2560 },
+  { label: 'UW 1440p', value: 3440 },
+  { label: '4K', value: 3840 },
+  { label: 'Natif', value: 0 },
+];
+// N'afficher que les résolutions <= largeur source + toujours "Natif"
+const availableResolutions = computed(() => {
+  const sw = sourceWidth.value;
+  if (!sw) return allResolutions; // Pas encore de source connue → tout afficher
+  return allResolutions.filter(r => r.value === 0 || r.value <= sw);
+});
 
 // Résolution réelle de l'écran distant (AVANT downscale encoder)
 // Utilisée pour le mapping des coordonnées souris
@@ -655,6 +678,15 @@ async function changeDisplay() {
     console.log('[VIEWER] SelectDisplay envoyé:', selectedDisplay.value);
   } catch (error) {
     console.error('Erreur changement écran:', error);
+  }
+}
+
+async function changeResolution() {
+  try {
+    await invoke('change_resolution', { width: selectedResolution.value });
+    console.log('[VIEWER] SetResolution envoyé:', selectedResolution.value);
+  } catch (error) {
+    console.error('Erreur changement résolution:', error);
   }
 }
 

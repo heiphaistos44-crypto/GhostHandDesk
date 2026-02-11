@@ -15,6 +15,10 @@ pub trait VideoEncoder: Send + Sync {
     /// Ajuster la qualité dynamiquement (utilisé par adaptive bitrate)
     /// Default: no-op pour les encodeurs qui ne supportent pas l'ajustement
     fn adjust_quality(&mut self, _quality: u8) {}
+
+    /// Changer la résolution cible de downscale
+    /// None = résolution native (pas de downscale), Some(w) = downscale à cette largeur
+    fn set_target_width(&mut self, _width: Option<u32>) {}
 }
 
 /// Encoded frame data
@@ -42,6 +46,8 @@ pub struct EncoderInfo {
 pub struct ImageEncoder {
     quality: u8,
     info: EncoderInfo,
+    /// Résolution cible pour le downscale (None = natif, Some(w) = downscale à w pixels de large)
+    target_width: Option<u32>,
 }
 
 impl ImageEncoder {
@@ -56,6 +62,7 @@ impl ImageEncoder {
                 bitrate: 0,
                 hardware_accelerated: false,
             },
+            target_width: Some(1280), // Default: downscale à 720p
         })
     }
 
@@ -103,15 +110,22 @@ impl VideoEncoder for ImageEncoder {
         // Convert RGBA to DynamicImage for potential downscale
         let dynamic_img = image::DynamicImage::ImageRgba8(img);
 
-        // PERF: Downscale to 1280x720 if source is larger (reduces JPEG size ~60%)
-        let (final_img, out_width, out_height) = if frame.width > 1280 {
-            let scale = 1280.0 / frame.width as f64;
-            let new_h = (frame.height as f64 * scale) as u32;
-            let resized = dynamic_img.resize_exact(1280, new_h, image::imageops::FilterType::Nearest);
-            let w = resized.width();
-            let h = resized.height();
-            (resized.to_rgb8(), w, h)
+        // PERF: Downscale si target_width est défini et source est plus large
+        let (final_img, out_width, out_height) = if let Some(tw) = self.target_width {
+            if frame.width > tw {
+                let scale = tw as f64 / frame.width as f64;
+                let new_h = (frame.height as f64 * scale) as u32;
+                let resized = dynamic_img.resize_exact(tw, new_h, image::imageops::FilterType::Nearest);
+                let w = resized.width();
+                let h = resized.height();
+                (resized.to_rgb8(), w, h)
+            } else {
+                let w = dynamic_img.width();
+                let h = dynamic_img.height();
+                (dynamic_img.to_rgb8(), w, h)
+            }
         } else {
+            // Natif : pas de downscale
             let w = dynamic_img.width();
             let h = dynamic_img.height();
             (dynamic_img.to_rgb8(), w, h)
@@ -147,6 +161,11 @@ impl VideoEncoder for ImageEncoder {
 
     fn adjust_quality(&mut self, quality: u8) {
         self.set_quality(quality);
+    }
+
+    fn set_target_width(&mut self, width: Option<u32>) {
+        self.target_width = width;
+        info!("Target width changé: {:?}", width);
     }
 }
 
