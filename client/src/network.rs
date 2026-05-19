@@ -22,7 +22,6 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 // Constantes réseau
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const CONNECTION_TIMEOUT_SECS: u64 = 30;
-const CHANNEL_BUFFER_SIZE: usize = 256;
 
 /// Signaling message types - format compatible avec le serveur Go
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1037,16 +1036,48 @@ impl SessionManager {
     }
 }
 
-/// Generate a random device ID
+/// Generate a cryptographically random device ID (128-bit entropy)
 pub fn generate_device_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    if rng.fill(&mut bytes).is_err() {
+        // Fallback: mix timestamp + process id for minimal uniqueness
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id() as u128;
+        let mixed = ts ^ (pid << 64);
+        bytes.copy_from_slice(&mixed.to_le_bytes());
+    }
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("GHD-{}", hex)
+}
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+/// Load persistent device ID from file, or generate and save a new one.
+/// This ensures the device ID survives application restarts.
+pub fn load_or_generate_device_id(data_dir: &std::path::Path) -> String {
+    let id_file = data_dir.join("device_id.txt");
 
-    format!("GHD-{:x}", timestamp)
+    // Try to load existing ID (must be GHD- prefix + 32 hex chars = 36 total)
+    if let Ok(id) = std::fs::read_to_string(&id_file) {
+        let id = id.trim().to_string();
+        if id.starts_with("GHD-") && id.len() == 36 {
+            return id;
+        }
+    }
+
+    // Generate new cryptographic ID
+    let id = generate_device_id();
+
+    // Persist to disk
+    let _ = std::fs::create_dir_all(data_dir);
+    if let Err(e) = std::fs::write(&id_file, &id) {
+        eprintln!("[WARN] Could not persist device ID to {}: {}", id_file.display(), e);
+    }
+
+    id
 }
 
 #[cfg(test)]
@@ -1056,21 +1087,30 @@ mod tests {
     #[test]
     fn test_generate_device_id() {
         let id1 = generate_device_id();
-
-        // Petit délai pour s'assurer d'une milliseconde différente
-        std::thread::sleep(std::time::Duration::from_millis(2));
-
         let id2 = generate_device_id();
 
-        // Vérifier format
+        // Format: "GHD-" + 32 hex chars = 36 total
+        assert!(id1.starts_with("GHD-"), "id1 missing GHD- prefix: {}", id1);
+        assert_eq!(id1.len(), 36, "expected 36 chars, got {}", id1.len());
+
+        // Cryptographic randomness → collision probability is negligible (2^-128)
+        assert_ne!(id1, id2, "two generated IDs should differ");
+    }
+
+    #[test]
+    fn test_load_or_generate_device_id_persistence() {
+        let dir = std::env::temp_dir().join(format!("ghd_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let id1 = load_or_generate_device_id(&dir);
+        let id2 = load_or_generate_device_id(&dir);
+
+        // Both calls should return the same persisted ID
+        assert_eq!(id1, id2, "persisted ID should be identical across calls");
         assert!(id1.starts_with("GHD-"));
-        assert!(id2.starts_with("GHD-"));
+        assert_eq!(id1.len(), 36);
 
-        // Vérifier longueur minimale
-        assert!(id1.len() > 8);
-
-        // IDs doivent être différents (avec le délai)
-        assert_ne!(id1, id2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -1103,23 +1143,15 @@ mod tests {
 
     #[test]
     fn test_signal_message_serialization() {
-        // Test sérialisation Register
-        let msg = SignalMessage::Register {
-            device_id: "GHD-test123".to_string(),
-        };
+        let msg = SignalMessage::register("GHD-test123".to_string());
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("Register"));
         assert!(json.contains("GHD-test123"));
 
-        // Test désérialisation
         let deserialized: SignalMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            SignalMessage::Register { device_id } => {
-                assert_eq!(device_id, "GHD-test123");
-            }
-            _ => panic!("Mauvais type de message"),
-        }
+        assert!(deserialized.is_type("Register"));
+        assert_eq!(deserialized.get_str("device_id").as_deref(), Some("GHD-test123"));
     }
 
     #[test]

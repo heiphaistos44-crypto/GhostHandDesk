@@ -52,7 +52,7 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"status":  "healthy",
 			"clients": hub.GetClientCount(),
 		})
@@ -61,7 +61,7 @@ func main() {
 	// Route de statistiques
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]any{
 			"total_clients": hub.GetClientCount(),
 			"uptime":        time.Since(startTime).String(),
 			"max_clients":   cfg.MaxClients,
@@ -80,17 +80,28 @@ func main() {
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
+	// Determine TLS mode
+	tlsEnabled := cfg.CertFile != "" && cfg.KeyFile != ""
+
 	// Démarrer le serveur dans une goroutine
 	go func() {
 		log.Printf("[MAIN] Serveur de signalement démarré sur %s", cfg.Host)
 		log.Println("[MAIN] Routes disponibles:")
-		log.Printf("  - ws://localhost%s/ws (WebSocket)", cfg.Host)
-		log.Printf("  - http://localhost%s/health (Health check)", cfg.Host)
-		log.Printf("  - http://localhost%s/stats (Statistiques)", cfg.Host)
-
-		// Démarrer en HTTP simple (sans TLS) pour localhost
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[MAIN] Erreur de démarrage du serveur: %v", err)
+		if tlsEnabled {
+			log.Printf("  - wss://localhost%s/ws (WebSocket sécurisé TLS)", cfg.Host)
+			log.Printf("  - https://localhost%s/health (Health check)", cfg.Host)
+			log.Printf("  - https://localhost%s/stats (Statistiques)", cfg.Host)
+			if err := server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("[MAIN] Erreur démarrage TLS: %v", err)
+			}
+		} else {
+			log.Printf("  - ws://localhost%s/ws (WebSocket — TLS désactivé, développement uniquement)", cfg.Host)
+			log.Printf("  - http://localhost%s/health (Health check)", cfg.Host)
+			log.Printf("  - http://localhost%s/stats (Statistiques)", cfg.Host)
+			log.Println("[WARN] TLS désactivé. Définissez CERT_FILE et KEY_FILE pour activer HTTPS/WSS en production.")
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("[MAIN] Erreur de démarrage du serveur: %v", err)
+			}
 		}
 	}()
 

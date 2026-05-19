@@ -28,25 +28,23 @@ type Config struct {
 
 // LoadFromEnv charge la configuration depuis les variables d'environnement
 func LoadFromEnv() *Config {
-	// Utiliser chemin absolu basé sur l'exécutable pour les certificats
-	exePath, err := os.Executable()
-	var exeDir string
-	if err == nil {
-		exeDir = filepath.Dir(exePath)
-	} else {
-		// Fallback sur le répertoire de travail actuel
-		exeDir, _ = os.Getwd()
+	// Resolve relative cert paths against the executable directory
+	certFile := getEnv("CERT_FILE", "")
+	keyFile := getEnv("KEY_FILE", "")
+	if exePath, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exePath)
+		if certFile != "" && !filepath.IsAbs(certFile) {
+			certFile = filepath.Join(exeDir, certFile)
+		}
+		if keyFile != "" && !filepath.IsAbs(keyFile) {
+			keyFile = filepath.Join(exeDir, keyFile)
+		}
 	}
-
-	// Chemins optionnels pour HTTPS (non requis pour HTTP simple)
-	// Si vous voulez activer HTTPS, définissez CERT_FILE et KEY_FILE dans l'environnement
-	defaultCertFile := ""
-	defaultKeyFile := ""
 
 	return &Config{
 		Host:              getEnv("SERVER_HOST", ":9000"),
-		CertFile:          getEnv("CERT_FILE", defaultCertFile),
-		KeyFile:           getEnv("KEY_FILE", defaultKeyFile),
+		CertFile:          certFile,
+		KeyFile:           keyFile,
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		MaxClients:        getEnvAsInt("MAX_CLIENTS", 1000),
 		ConnectionTimeout: getEnvAsInt("CONNECTION_TIMEOUT", 60),

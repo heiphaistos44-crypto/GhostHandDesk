@@ -3,10 +3,16 @@ use base64::prelude::*;
 use ring::aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 const NONCE_SIZE: usize = 12;
 const KEY_SIZE: usize = 32;
+const SALT_SIZE: usize = 16;
+const PBKDF2_OUTPUT_SIZE: usize = 32;
+// 100 000 iterations — OWASP minimum for PBKDF2-SHA256 (2024)
+// SAFETY: 100_000 is non-zero
+const PBKDF2_ITERATIONS: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(100_000) };
 
 /// Cryptography manager for E2E encryption
 pub struct CryptoManager {
@@ -91,43 +97,58 @@ impl CryptoManager {
         Ok(plaintext.to_vec())
     }
 
-    /// Generate a password hash for authentication
+    /// Generate a 16-byte cryptographic salt for PBKDF2
+    fn generate_salt(&self) -> Result<Vec<u8>> {
+        let mut salt = vec![0u8; SALT_SIZE];
+        self.rng.fill(&mut salt).map_err(|e| {
+            GhostHandError::Crypto(format!("Failed to generate salt: {:?}", e))
+        })?;
+        Ok(salt)
+    }
+
+    /// Hash a password using PBKDF2-SHA256 (100 000 iterations).
+    /// Output: base64(salt[16] || dk[32])
     pub fn hash_password(&self, password: &str) -> Result<String> {
-        use ring::digest;
+        let salt = self.generate_salt()?;
+        let mut dk = [0u8; PBKDF2_OUTPUT_SIZE];
 
-        let salt = self.generate_nonce()?;
-        let mut to_hash = password.as_bytes().to_vec();
-        to_hash.extend_from_slice(&salt);
+        ring::pbkdf2::derive(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256,
+            PBKDF2_ITERATIONS,
+            &salt,
+            password.as_bytes(),
+            &mut dk,
+        );
 
-        let hash = digest::digest(&digest::SHA256, &to_hash);
-
-        // Combine salt and hash
         let mut result = salt;
-        result.extend_from_slice(hash.as_ref());
-
+        result.extend_from_slice(&dk);
         Ok(BASE64_STANDARD.encode(result))
     }
 
-    /// Verify a password against a hash
+    /// Verify a password against a PBKDF2-SHA256 hash.
+    /// Uses constant-time comparison via ring to prevent timing attacks.
     pub fn verify_password(&self, password: &str, hash: &str) -> Result<bool> {
-        use ring::digest;
-
         let combined = BASE64_STANDARD
             .decode(hash)
             .map_err(|e| GhostHandError::Crypto(format!("Invalid hash format: {}", e)))?;
 
-        if combined.len() < NONCE_SIZE {
+        if combined.len() != SALT_SIZE + PBKDF2_OUTPUT_SIZE {
             return Ok(false);
         }
 
-        let (salt, stored_hash) = combined.split_at(NONCE_SIZE);
+        let (salt, stored_dk) = combined.split_at(SALT_SIZE);
 
-        let mut to_hash = password.as_bytes().to_vec();
-        to_hash.extend_from_slice(salt);
-
-        let computed_hash = digest::digest(&digest::SHA256, &to_hash);
-
-        Ok(computed_hash.as_ref() == stored_hash)
+        // ring::pbkdf2::verify performs constant-time comparison internally
+        match ring::pbkdf2::verify(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256,
+            PBKDF2_ITERATIONS,
+            salt,
+            password.as_bytes(),
+            stored_dk,
+        ) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 }
 
@@ -291,7 +312,6 @@ mod tests {
         assert_eq!(alice_private.len(), 32);
         assert_eq!(alice_public.len(), 32);
 
-        // Bob génère sa paire de clés
         let (bob_private, bob_public) = kex.generate_keypair()?;
         assert_eq!(bob_private.len(), 32);
         assert_eq!(bob_public.len(), 32);
@@ -314,11 +334,9 @@ mod tests {
         let kex = KeyExchange::new();
         let crypto = CryptoManager::new();
 
-        // Simulation d'un échange de clés entre Alice et Bob
-        let (alice_private, alice_public) = kex.generate_keypair()?;
-        let (bob_private, bob_public) = kex.generate_keypair()?;
-
-        // Dériver le secret partagé
+        // Only Alice's private + Bob's public needed to derive shared secret
+        let (alice_private, _alice_public) = kex.generate_keypair()?;
+        let (_bob_private, bob_public) = kex.generate_keypair()?;
         let shared_secret = kex.derive_shared_secret(&alice_private, &bob_public)?;
 
         // Alice chiffre un message avec le secret partagé

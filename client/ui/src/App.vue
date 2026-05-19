@@ -55,6 +55,7 @@
     <!-- Settings Panel (overlay) -->
     <SettingsPanel
       v-if="settingsOpen"
+      :initial-settings="currentSettings"
       @close="settingsOpen = false"
       @update="handleSettingsUpdate"
     />
@@ -85,6 +86,11 @@ interface ConnectionRequest {
   timestamp: number;
 }
 
+interface AppSettings {
+  server_url: string;
+  stun_servers: string[];
+}
+
 // États réactifs
 const deviceId = ref<string>('');
 const connected = ref(false);
@@ -93,6 +99,7 @@ const connectedTo = ref<string>('');
 const connectionError = ref<string>('');
 const settingsOpen = ref(false);
 const showSettings = ref(true);
+const currentSettings = ref<AppSettings | null>(null);
 
 // États pour la popup de demande de connexion
 const connectionRequestVisible = ref(false);
@@ -119,11 +126,12 @@ onMounted(async () => {
   try {
     // Récupérer le Device ID depuis le backend Rust
     deviceId.value = await invoke<string>('get_device_id');
-    console.log('Device ID:', deviceId.value);
+
+    // Charger les paramètres persistés
+    currentSettings.value = await invoke<AppSettings>('load_settings');
 
     // Initialiser la session au démarrage
     await invoke('initialize_session');
-    console.log('Session initialisée');
 
     // Démarrer l'écoute des demandes de connexion entrantes
     await invoke('start_listening_for_requests');
@@ -243,9 +251,25 @@ function copyDeviceId() {
   }
 }
 
-function handleSettingsUpdate(settings: any) {
-  console.log('Mise à jour paramètres:', settings);
-  // TODO: Envoyer au backend
+async function handleSettingsUpdate(settings: any) {
+  const prevUrl = currentSettings.value?.server_url;
+  const newAppSettings: AppSettings = {
+    server_url: settings.serverUrl,
+    stun_servers: settings.stunServers,
+  };
+
+  try {
+    await invoke('save_settings', { settings: newAppSettings });
+    currentSettings.value = newAppSettings;
+
+    // Reconnecter au signaling si l'URL a changé
+    if (prevUrl !== newAppSettings.server_url || !connected.value) {
+      await invoke('initialize_session');
+    }
+  } catch (e: any) {
+    console.error('Erreur sauvegarde paramètres:', e);
+    connectionError.value = e?.toString() ?? 'Erreur sauvegarde paramètres';
+  }
 }
 </script>
 

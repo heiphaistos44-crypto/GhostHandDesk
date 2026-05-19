@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,20 +28,29 @@ var upgrader = websocket.Upgrader{
 		http.Error(w, reason.Error(), status)
 	},
 	CheckOrigin: func(r *http.Request) bool {
+		// VPS public : accepter toutes les origines
+		if os.Getenv("ALLOW_ALL_ORIGINS") == "true" {
+			return true
+		}
+
 		origin := r.Header.Get("Origin")
 
-		// Liste blanche d'origines autorisées
+		// Tauri app n'envoie pas d'Origin (connexion locale)
+		if origin == "" {
+			return true
+		}
+
 		allowedOrigins := []string{
 			"http://localhost:9000",
 			"http://127.0.0.1:9000",
-			"http://localhost:1420",  // Port dev Tauri
+			"http://localhost:1420",
 			"http://127.0.0.1:1420",
-			"tauri://localhost",      // Origine Tauri en production
+			"tauri://localhost",
+			"https://tauri.localhost",
 		}
 
-		// Vérifier si l'origine est dans la whitelist
-		for _, allowed := range allowedOrigins {
-			if origin == allowed {
+		for _, o := range allowedOrigins {
+			if origin == o {
 				return true
 			}
 		}
@@ -113,7 +123,7 @@ func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// Envoyer une confirmation d'enregistrement
 	confirmMsg := models.Message{
 		Type: models.TypeRegister,
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"success": true,
 			"message": "Enregistrement réussi",
 		},

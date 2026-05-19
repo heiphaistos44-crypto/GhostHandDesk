@@ -1,6 +1,5 @@
 // Prevents additional console window on Windows in release
-// TEMPORAIREMENT DÉSACTIVÉ POUR DEBUG
-// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -10,9 +9,9 @@ use tokio::sync::Mutex;
 // Import des modules du client
 use ghost_hand_client::audit::{audit_log, init_global_logger, AuditEvent, AuditLevel};
 use ghost_hand_client::config::{Config, VideoCodec};
-use ghost_hand_client::network::{generate_device_id, SessionManager};
+use ghost_hand_client::network::{load_or_generate_device_id, SessionManager};
 use ghost_hand_client::protocol::ControlMessage;
-use ghost_hand_client::storage::{global_storage, init_global_storage, ConnectionHistory};
+use ghost_hand_client::storage::{global_storage, init_global_storage, ConnectionHistory, KnownPeer};
 use ghost_hand_client::streaming::{Streamer, Receiver, InputHandler};
 use ghost_hand_client::screen_capture;
 use ghost_hand_client::video_encoder;
@@ -28,11 +27,17 @@ struct ConnectionRequest {
 // État global de l'application
 struct AppState {
     device_id: String,
+    data_dir: std::path::PathBuf,
     session_manager: Arc<Mutex<Option<SessionManager>>>,
     config: Arc<Mutex<Config>>,
     pending_requests: Arc<Mutex<Vec<ConnectionRequest>>>,
     streamer_handle: Arc<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
+
+mod storage_commands;
+mod settings_commands;
+use storage_commands::*;
+use settings_commands::*;
 
 // Note: Le serveur de signalement doit être lancé MANUELLEMENT en externe
 // avec le script 1-SERVEUR.bat pour permettre plusieurs instances
@@ -79,89 +84,7 @@ struct KeyModifiers {
     meta: bool,
 }
 
-// ============================================================================
-// Commandes Storage
-// ============================================================================
-
-/// Obtenir l'historique des connexions
-#[tauri::command]
-fn get_connection_history(limit: Option<usize>) -> Result<Vec<ConnectionHistory>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let history = storage.get_connection_history(limit);
-            Ok(history.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les pairs connus
-#[tauri::command]
-fn get_known_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let peers = storage.get_all_known_peers();
-            Ok(peers.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les pairs favoris
-#[tauri::command]
-fn get_favorite_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            let peers = storage.get_favorite_peers();
-            Ok(peers.into_iter().cloned().collect())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Marquer un pair comme favori
-#[tauri::command]
-fn set_peer_favorite(peer_id: String, favorite: bool) -> Result<(), String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(mut storage) = storage_mutex.lock() {
-            if storage.set_peer_favorite(&peer_id, favorite) {
-                storage.save().map_err(|e| format!("Erreur sauvegarde: {}", e))?;
-                Ok(())
-            } else {
-                Err(format!("Pair {} introuvable", peer_id))
-            }
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-/// Obtenir les statistiques du storage
-#[tauri::command]
-async fn get_storage_stats() -> Result<ghost_hand_client::storage::StorageStats, String> {
-    if let Some(storage_mutex) = global_storage() {
-        if let Ok(storage) = storage_mutex.lock() {
-            Ok(storage.get_stats())
-        } else {
-            Err("Impossible de verrouiller le storage".to_string())
-        }
-    } else {
-        Err("Storage non initialisé".to_string())
-    }
-}
-
-// ============================================================================
+// Storage commands are in storage_commands.rs
 
 /// Nettoyer les requêtes de connexion expirées
 fn cleanup_old_requests(requests: &mut Vec<ConnectionRequest>) {
@@ -224,12 +147,9 @@ async fn connect_to_device(
 
     let mut session_guard = state.session_manager.lock().await;
 
-    // S'assurer qu'on a un SessionManager
-    if session_guard.is_none() {
-        return Err("SessionManager non initialisé. Appelez initialize_session() d'abord.".to_string());
-    }
-
-    let session = session_guard.as_mut().unwrap();
+    let session = session_guard
+        .as_mut()
+        .ok_or("SessionManager non initialisé. Appelez initialize_session() d'abord.")?;
 
     // Connecter au device cible
     session
@@ -266,7 +186,7 @@ async fn connect_to_device(
                 updated_peer.connection_count += 1;
                 storage.upsert_known_peer(updated_peer);
             } else {
-                storage.upsert_known_peer(ghost_hand_client::storage::KnownPeer {
+                storage.upsert_known_peer(KnownPeer {
                     peer_id: target_id.clone(),
                     display_name: None,
                     last_seen: timestamp,
@@ -670,18 +590,31 @@ async fn start_listening_for_requests(
 }
 
 fn main() {
-    // Initialiser la configuration
-    let config = Config::default();
-
-    // Générer le Device ID
-    let device_id = generate_device_id();
-
-    // Initialiser le logger d'audit
-    let log_dir = std::env::current_exe()
+    // Resolve data and log directories relative to the executable
+    let exe_parent = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("logs")))
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
+
+    let data_dir = exe_parent
+        .as_ref()
+        .map(|p| p.join("data"))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    let log_dir = exe_parent
+        .map(|p| p.join("logs"))
         .unwrap_or_else(|| std::path::PathBuf::from("./logs"));
 
+    // Load settings from disk (server_url, stun_servers) — must happen before Config::default()
+    // so that the saved URL overrides the hardcoded localhost default.
+    let saved_settings = settings_commands::load_settings_from_disk(&data_dir);
+
+    // Build base config and apply persisted settings
+    let mut config = Config::default();
+    saved_settings.apply_to_config(&mut config);
+
+    // Load persistent device ID (or generate + save a new one)
+    let device_id = load_or_generate_device_id(&data_dir);
+
+    // Initialiser le logger d'audit
     if let Err(e) = init_global_logger(&log_dir, device_id.clone()) {
         eprintln!("⚠️  Erreur initialisation audit logger: {}", e);
     } else {
@@ -699,10 +632,6 @@ fn main() {
     }
 
     // Initialiser le storage persistant
-    let data_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("data")))
-        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
 
     if let Err(e) = init_global_storage(&data_dir) {
         eprintln!("⚠️  Erreur initialisation storage: {}", e);
@@ -729,6 +658,7 @@ fn main() {
     // Créer l'état global
     let app_state = AppState {
         device_id: device_id.clone(),
+        data_dir: data_dir.clone(),
         session_manager: Arc::new(Mutex::new(None)),
         config: Arc::new(Mutex::new(config)),
         pending_requests: Arc::new(Mutex::new(Vec::new())),
@@ -765,19 +695,22 @@ fn main() {
             get_favorite_peers,
             set_peer_favorite,
             get_storage_stats,
+            // Settings commands
+            load_settings,
+            save_settings,
         ])
         .setup(move |app| {
             // NE PAS démarrer le serveur automatiquement
             // Il doit être lancé MANUELLEMENT en externe pour permettre plusieurs instances
             // Le serveur doit être lancé avec 1-SERVEUR.bat qui configure le port 9000
 
-            // Récupérer la fenêtre principale
-            let window = app.get_webview_window("main").unwrap();
-
-            // Définir le titre avec le Device ID
-            window
-                .set_title(&format!("GhostHandDesk - {}", device_id_for_title))
-                .unwrap();
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_title(&format!("GhostHandDesk - {}", device_id_for_title)) {
+                    eprintln!("[WARN] Could not set window title: {}", e);
+                }
+            } else {
+                eprintln!("[WARN] Main window not found during setup");
+            }
 
             println!("[TAURI] Application initialisée");
             println!("[TAURI] Interface disponible");

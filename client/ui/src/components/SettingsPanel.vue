@@ -191,13 +191,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
+
+interface AppSettings {
+  server_url: string;
+  stun_servers: string[];
+}
+
+// Props
+const props = defineProps<{
+  initialSettings?: AppSettings | null;
+}>();
 
 // Emits
 const emit = defineEmits<{
   close: [];
   update: [settings: any];
 }>();
+
+const DEFAULT_STUN = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun1.l.google.com:19302',
+  'stun:stun.cloudflare.com:3478',
+  'stun:stun.services.mozilla.com',
+];
 
 // Settings state
 const settings = ref({
@@ -209,10 +226,7 @@ const settings = ref({
 
   // Réseau
   serverUrl: 'ws://localhost:9000/ws',
-  stunServers: [
-    'stun:stun.l.google.com:19302',
-    'stun:stun1.l.google.com:19302',
-  ],
+  stunServers: [...DEFAULT_STUN],
 
   // Performance
   hardwareAcceleration: false,
@@ -229,6 +243,18 @@ const settings = ref({
   connectionPassword: '',
   encryptData: true,
 });
+
+// Initialiser depuis les paramètres persistés dès que la prop arrive
+watch(
+  () => props.initialSettings,
+  (s) => {
+    if (s) {
+      settings.value.serverUrl = s.server_url;
+      settings.value.stunServers = [...s.stun_servers];
+    }
+  },
+  { immediate: true }
+);
 
 // Computed pour STUN servers (textarea)
 const stunServersText = computed({
@@ -260,10 +286,7 @@ function resetToDefaults() {
       bitrate: 4000,
       quality: 80,
       serverUrl: 'ws://localhost:9000/ws',
-      stunServers: [
-        'stun:stun.l.google.com:19302',
-        'stun:stun1.l.google.com:19302',
-      ],
+      stunServers: [...DEFAULT_STUN],
       hardwareAcceleration: false,
       lowLatencyMode: true,
       adaptiveBitrate: true,

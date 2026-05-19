@@ -105,13 +105,20 @@ impl Default for Config {
                 "9000".to_string()
             });
 
-        let server_url = format!("ws://localhost:{}/ws", port);
+        // GHD_SERVER_URL takes precedence over port-based URL
+        let server_url = std::env::var("GHD_SERVER_URL")
+            .unwrap_or_else(|_| format!("ws://localhost:{}/ws", port));
 
         Self {
             server_url,
             stun_servers: vec![
+                // Google STUN (primary)
                 "stun:stun.l.google.com:19302".to_string(),
                 "stun:stun1.l.google.com:19302".to_string(),
+                // Cloudflare STUN (low latency, anycast)
+                "stun:stun.cloudflare.com:3478".to_string(),
+                // Mozilla STUN (reliable fallback)
+                "stun:stun.services.mozilla.com".to_string(),
             ],
             turn_servers: vec![],
             video_config: VideoConfig::default(),
