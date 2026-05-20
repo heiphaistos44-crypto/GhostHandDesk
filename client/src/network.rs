@@ -1,6 +1,7 @@
 use crate::audit::{audit_log, AuditEvent, AuditLevel};
 use crate::config::Config;
 use crate::error::{error_codes, GhostHandError, Result};
+use crate::validation;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 // Constantes réseau
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 const CONNECTION_TIMEOUT_SECS: u64 = 30;
+
 
 /// Signaling message types - format compatible avec le serveur Go
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +122,27 @@ impl SignalMessage {
         }
     }
 
+    pub fn password_challenge(peer_id: String, challenge: String, salt: String) -> Self {
+        Self {
+            msg_type: "PasswordChallenge".to_string(),
+            data: Some(serde_json::json!({
+                "peer_id": peer_id,
+                "challenge": challenge,
+                "salt": salt
+            })),
+        }
+    }
+
+    pub fn password_response(peer_id: String, response: String) -> Self {
+        Self {
+            msg_type: "PasswordResponse".to_string(),
+            data: Some(serde_json::json!({
+                "peer_id": peer_id,
+                "response": response
+            })),
+        }
+    }
+
     // Méthodes utilitaires pour extraire les données
     pub fn get_str(&self, field: &str) -> Option<String> {
         self.data.as_ref()?.get(field)?.as_str().map(|s| s.to_string())
@@ -145,6 +168,8 @@ pub struct SignalingClient {
     pub tx: Option<mpsc::UnboundedSender<SignalMessage>>,
     rx: Option<mpsc::UnboundedReceiver<SignalMessage>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    auto_reconnect: bool,
+    max_backoff_secs: u64,
 }
 
 impl SignalingClient {
@@ -155,6 +180,40 @@ impl SignalingClient {
             tx: None,
             rx: None,
             tasks: Vec::new(),
+            auto_reconnect: false,
+            max_backoff_secs: 60,
+        }
+    }
+
+    /// Enable auto-reconnect with exponential backoff
+    pub fn with_auto_reconnect(mut self, max_backoff_secs: u64) -> Self {
+        self.auto_reconnect = true;
+        self.max_backoff_secs = max_backoff_secs;
+        self
+    }
+
+    /// Connect with auto-reconnect (exponential backoff: 1s, 2s, 4s, ... up to max_backoff)
+    pub async fn connect_with_reconnect(&mut self) -> Result<()> {
+        let mut backoff_secs = 1u64;
+
+        loop {
+            match self.connect().await {
+                Ok(()) => {
+                    info!("Connexion au serveur de signaling établie");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if !self.auto_reconnect {
+                        return Err(e);
+                    }
+                    warn!(
+                        "Échec de connexion, nouvelle tentative dans {} secondes: {}",
+                        backoff_secs, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(self.max_backoff_secs);
+                }
+            }
         }
     }
 
@@ -199,20 +258,34 @@ impl SignalingClient {
         self.tx = Some(tx);
         self.rx = Some(rx);
 
-        // Spawn task to handle outgoing messages
-        let handle_out = tokio::spawn(async move {
-            while let Some(msg) = internal_rx.recv().await {
-                let json = match serde_json::to_string(&msg) {
-                    Ok(j) => j,
-                    Err(e) => {
-                        error!("Failed to serialize message: {}", e);
-                        continue;
-                    }
-                };
+        // Canal pour envoyer des messages WebSocket bruts (Pong) depuis handle_in vers handle_out
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<Message>();
 
-                if let Err(e) = write.send(Message::Text(json)).await {
-                    error!("Failed to send message: {}", e);
-                    break;
+        // Spawn task to handle outgoing messages (SignalMessages + raw Pong)
+        let handle_out = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(msg) = internal_rx.recv() => {
+                        let json = match serde_json::to_string(&msg) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                error!("Failed to serialize message: {}", e);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = write.send(Message::Text(json)).await {
+                            error!("Failed to send message: {}", e);
+                            break;
+                        }
+                    }
+                    Some(raw_msg) = raw_rx.recv() => {
+                        // Envoyer message brut (Pong response)
+                        if let Err(e) = write.send(raw_msg).await {
+                            error!("Failed to send raw message: {}", e);
+                            break;
+                        }
+                    }
+                    else => break,
                 }
             }
         });
@@ -231,9 +304,13 @@ impl SignalingClient {
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to deserialize message: {}", e);
+                                warn!("Failed to deserialize message: {} | text: {}", e, &text[..text.len().min(100)]);
                             }
                         }
+                    }
+                    Ok(Message::Ping(data)) => {
+                        // Répondre au Ping avec un Pong (sinon le serveur déconnecte après 60s)
+                        let _ = raw_tx.send(Message::Pong(data));
                     }
                     Ok(Message::Close(_)) => {
                         info!("WebSocket connection closed");
@@ -393,6 +470,9 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
+        // Validation SDP via module validation
+        validation::validate_sdp(&offer.sdp)?;
+
         info!("Offre WebRTC créée avec succès");
 
         // 4. Retourner SDP string
@@ -426,6 +506,9 @@ impl WebRTCConnection {
             .await
             .map_err(|e| GhostHandError::WebRTC(format!("Erreur de définition de la description locale: {}", e)))?;
 
+        // Validation SDP via module validation
+        validation::validate_sdp(&answer.sdp)?;
+
         info!("Réponse WebRTC créée avec succès");
 
         // 5. Retourner answer SDP
@@ -434,6 +517,9 @@ impl WebRTCConnection {
 
     /// Set remote description
     pub async fn set_remote_description(&self, sdp: &str, sdp_type: RTCSdpType) -> Result<()> {
+        // Validation SDP via module validation
+        validation::validate_sdp(sdp)?;
+
         info!("Définition de la description distante (type: {:?})", sdp_type);
 
         // Créer la session description selon le type
@@ -472,13 +558,46 @@ impl WebRTCConnection {
     }
 
     /// Send data over the data channel
+    /// Taille max d'un chunk WebRTC (60KB - safe limit, WebRTC max ~256KB)
+    const MAX_CHUNK_SIZE: usize = 60 * 1024;
+
     pub async fn send_data(&self, data: &[u8]) -> Result<()> {
         let dc_lock = self.data_channel.read().await;
 
         if let Some(dc) = dc_lock.as_ref() {
-            dc.send(&Bytes::from(data.to_vec()))
-                .await
-                .map_err(|e| GhostHandError::WebRTC(format!("Erreur d'envoi de données: {}", e)))?;
+            if data.len() <= Self::MAX_CHUNK_SIZE {
+                // Message petit : envoi direct
+                dc.send(&Bytes::from(data.to_vec()))
+                    .await
+                    .map_err(|e| GhostHandError::WebRTC(format!("Erreur d'envoi de données: {}", e)))?;
+            } else {
+                // Message trop gros : fragmenter
+                // PERF: Pré-construire tous les buffers puis les envoyer en batch
+                let mut messages: Vec<Bytes> = Vec::new();
+
+                // Header: [0xFF][0x01][total_len: u32 LE]
+                let mut header = Vec::with_capacity(6);
+                header.push(0xFF);
+                header.push(0x01);
+                header.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                messages.push(Bytes::from(header));
+
+                // Chunks de données: [0xFF][0x02][data...]
+                for chunk in data.chunks(Self::MAX_CHUNK_SIZE) {
+                    let mut chunk_msg = Vec::with_capacity(2 + chunk.len());
+                    chunk_msg.push(0xFF);
+                    chunk_msg.push(0x02);
+                    chunk_msg.extend_from_slice(chunk);
+                    messages.push(Bytes::from(chunk_msg));
+                }
+
+                // Envoyer tous les messages d'un coup (un seul verrouillage du DC)
+                for msg in messages {
+                    dc.send(&msg)
+                        .await
+                        .map_err(|e| GhostHandError::WebRTC(format!("Erreur envoi chunk: {}", e)))?;
+                }
+            }
             Ok(())
         } else {
             Err(GhostHandError::WebRTC("Data channel non disponible".into()))
@@ -537,11 +656,12 @@ impl SessionManager {
         offers.clear();
     }
 
-    /// Initialize and connect to signaling server
+    /// Initialize and connect to signaling server with auto-reconnect
     pub async fn initialize(&mut self) -> Result<()> {
         let mut signaling =
-            SignalingClient::new(self.config.server_url.clone(), self.device_id.clone());
-        signaling.connect().await?;
+            SignalingClient::new(self.config.server_url.clone(), self.device_id.clone())
+                .with_auto_reconnect(60);
+        signaling.connect_with_reconnect().await?;
         self.signaling = Some(signaling);
 
         Ok(())
@@ -574,17 +694,27 @@ impl SessionManager {
 
     /// Request connection to a remote device
     pub async fn connect_to_device(&mut self, target_id: String, password: Option<String>) -> Result<()> {
+        // Valider les entrées
+        validation::validate_device_id(&target_id)?;
+        if let Some(ref pwd) = password {
+            validation::validate_password(pwd)?;
+        }
+
         info!("Connexion à {} demandée", target_id);
 
         // Sauvegarder le fait qu'un password est fourni avant de le move
         let password_was_used = password.is_some();
+        let password_clone = password.clone();
 
         // 1. Envoyer ConnectRequest et attendre ConnectionAccepted
+        let connect_msg = SignalMessage::connect_request(target_id.clone(), password);
+        debug!("📤 [CLIENT] AVANT ENVOI ConnectRequest vers {} | Message: {:?}", target_id, connect_msg);
+
         self.signaling.as_ref().ok_or_else(|| {
             GhostHandError::Network("Not connected to signaling server".to_string())
-        })?.send(SignalMessage::connect_request(target_id.clone(), password)).await?;
+        })?.send(connect_msg).await?;
 
-        info!("Demande de connexion envoyée à {}, attente d'acceptation...", target_id);
+        info!("✅ [CLIENT] Demande de connexion envoyée à {}, attente d'acceptation...", target_id);
 
         // Attendre ConnectionAccepted
         let timeout = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS));
@@ -592,11 +722,46 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("ConnectionAccepted") {
                         // Le message vient du target qui a accepté
                         info!("Connexion acceptée par {}", target_id);
                         break;
+                    } else if msg.is_type("PasswordChallenge") {
+                        // Le host demande une vérification de password
+                        info!("Challenge de password reçu de {}", target_id);
+                        if let (Some(challenge_b64), Some(salt_b64)) = (msg.get_str("challenge"), msg.get_str("salt")) {
+                            if let Some(ref pwd) = password_clone {
+                                use base64::prelude::*;
+                                let challenge = BASE64_STANDARD.decode(&challenge_b64).map_err(|e| {
+                                    GhostHandError::Network(format!("Invalid challenge: {}", e))
+                                })?;
+                                let salt = BASE64_STANDARD.decode(&salt_b64).map_err(|e| {
+                                    GhostHandError::Network(format!("Invalid salt: {}", e))
+                                })?;
+
+                                let response = crate::crypto::compute_challenge_response(pwd, &salt, &challenge);
+
+                                self.signaling.as_ref().ok_or_else(|| {
+                                    GhostHandError::Network("Signaling disconnected".into())
+                                })?.send(
+                                    SignalMessage::password_response(target_id.clone(), response)
+                                ).await?;
+
+                                info!("Réponse au challenge envoyée");
+                            } else {
+                                return Err(GhostHandError::network_with_code(
+                                    error_codes::NETWORK_CONNECTION_FAILED,
+                                    "Le host requiert un password mais aucun n'a été fourni"
+                                ));
+                            }
+                        }
                     } else if msg.is_type("ConnectionRejected") {
                         if let Some(reason) = msg.get_str("reason") {
                             return Err(GhostHandError::network_with_code(
@@ -610,7 +775,6 @@ impl SessionManager {
                             ));
                         }
                     } else if msg.is_type("Error") {
-                        // Gérer les messages d'erreur du serveur
                         if let Some(error_msg) = msg.get_str("message") {
                             return Err(GhostHandError::network_with_code(
                                 error_codes::NETWORK_INVALID_MESSAGE,
@@ -623,7 +787,6 @@ impl SessionManager {
                             ));
                         }
                     } else {
-                        // Ignorer les autres messages (ils seront traités ailleurs)
                         debug!("Message ignoré en attente de ConnectionAccepted: {:?}", msg.msg_type);
                     }
                 }
@@ -724,7 +887,9 @@ impl SessionManager {
         info!("Création de l'offre WebRTC");
         let offer_sdp = webrtc_conn.create_offer().await?;
 
-        self.signaling.as_ref().unwrap().send(SignalMessage::offer(
+        self.signaling.as_ref().ok_or_else(|| {
+            GhostHandError::Network("Signaling disconnected".into())
+        })?.send(SignalMessage::offer(
             self.device_id.clone(),
             target_id.clone(),
             offer_sdp,
@@ -740,7 +905,13 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("Answer") {
                         if let Some(from) = msg.get_str("from") {
                             if from == target_id {
@@ -890,7 +1061,9 @@ impl SessionManager {
         let answer_sdp = webrtc_conn.create_answer(&offer_sdp).await?;
 
         // 5. Envoyer answer
-        self.signaling.as_ref().unwrap().send(SignalMessage::answer(
+        self.signaling.as_ref().ok_or_else(|| {
+            GhostHandError::Network("Signaling disconnected".into())
+        })?.send(SignalMessage::answer(
             self.device_id.clone(),
             from.clone(),
             answer_sdp,
@@ -904,7 +1077,13 @@ impl SessionManager {
 
         loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("IceCandidate") {
                         if let Some(ice_from) = msg.get_str("from") {
                             if ice_from == from {
@@ -948,6 +1127,82 @@ impl SessionManager {
     pub async fn accept_connection(&mut self, from: String) -> Result<()> {
         info!("Acceptation de la connexion de {}", from);
 
+        // Vérification de password si configuré
+        if let Some(ref password_hash) = self.config.security_config.password_hash {
+            info!("Password configuré, envoi du challenge...");
+
+            // Générer un challenge
+            let challenge = crate::crypto::generate_challenge()?;
+            let salt = crate::crypto::extract_salt_from_hash(password_hash)?;
+
+            use base64::prelude::*;
+            let challenge_b64 = BASE64_STANDARD.encode(&challenge);
+            let salt_b64 = BASE64_STANDARD.encode(&salt);
+
+            // Envoyer le challenge
+            self.signaling.as_ref().ok_or_else(|| {
+                GhostHandError::Network("Not connected to signaling server".to_string())
+            })?.send(SignalMessage::password_challenge(from.clone(), challenge_b64, salt_b64)).await?;
+
+            // Attendre la réponse
+            let timeout = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS));
+            tokio::pin!(timeout);
+
+            let password_ok = loop {
+                tokio::select! {
+                    msg_result = async {
+                        match self.signaling.as_mut() {
+                            Some(s) => s.receive().await,
+                            None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                        }
+                    } => {
+                        let msg = msg_result?;
+                        if msg.is_type("PasswordResponse") {
+                            if let Some(response) = msg.get_str("response") {
+                                let valid = crate::crypto::verify_challenge_response(
+                                    password_hash, &challenge, &response
+                                )?;
+                                break valid;
+                            }
+                        } else {
+                            debug!("Message ignoré en attente de PasswordResponse: {:?}", msg.msg_type);
+                        }
+                    }
+                    _ = &mut timeout => {
+                        return Err(GhostHandError::network_with_code(
+                            error_codes::NETWORK_TIMEOUT,
+                            "Timeout en attente de la réponse au challenge"
+                        ));
+                    }
+                }
+            };
+
+            if !password_ok {
+                // Rejeter la connexion
+                self.signaling.as_ref().ok_or_else(|| {
+                    GhostHandError::Network("Signaling disconnected".into())
+                })?.send(
+                    SignalMessage::connection_rejected(from.clone(), "Password incorrect".to_string())
+                ).await?;
+
+                audit_log(
+                    AuditLevel::Security,
+                    AuditEvent::SecurityError {
+                        error_code: "PASSWORD_FAILED".to_string(),
+                        description: "Échec de vérification du password".to_string(),
+                        peer_id: Some(from.clone()),
+                    },
+                );
+
+                return Err(GhostHandError::network_with_code(
+                    error_codes::NETWORK_CONNECTION_FAILED,
+                    "Password incorrect"
+                ));
+            }
+
+            info!("Password vérifié avec succès pour {}", from);
+        }
+
         // 1. Envoyer l'acceptation
         self.signaling.as_ref().ok_or_else(|| {
             GhostHandError::Network("Not connected to signaling server".to_string())
@@ -969,7 +1224,13 @@ impl SessionManager {
 
         let offer_sdp = loop {
             tokio::select! {
-                Ok(msg) = self.signaling.as_mut().unwrap().receive() => {
+                msg_result = async {
+                    match self.signaling.as_mut() {
+                        Some(s) => s.receive().await,
+                        None => Err(GhostHandError::Network("Signaling disconnected".into())),
+                    }
+                } => {
+                    let msg = msg_result?;
                     if msg.is_type("Offer") {
                         if let Some(offer_from) = msg.get_str("from") {
                             if offer_from == from {
@@ -1036,48 +1297,18 @@ impl SessionManager {
     }
 }
 
-/// Generate a cryptographically random device ID (128-bit entropy)
+/// Generate a random device ID with timestamp + random component
 pub fn generate_device_id() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 16];
-    if rng.fill(&mut bytes).is_err() {
-        // Fallback: mix timestamp + process id for minimal uniqueness
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id() as u128;
-        let mixed = ts ^ (pid << 64);
-        bytes.copy_from_slice(&mixed.to_le_bytes());
-    }
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("GHD-{}", hex)
-}
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use rand::Rng;
 
-/// Load persistent device ID from file, or generate and save a new one.
-/// This ensures the device ID survives application restarts.
-pub fn load_or_generate_device_id(data_dir: &std::path::Path) -> String {
-    let id_file = data_dir.join("device_id.txt");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
 
-    // Try to load existing ID (must be GHD- prefix + 32 hex chars = 36 total)
-    if let Ok(id) = std::fs::read_to_string(&id_file) {
-        let id = id.trim().to_string();
-        if id.starts_with("GHD-") && id.len() == 36 {
-            return id;
-        }
-    }
-
-    // Generate new cryptographic ID
-    let id = generate_device_id();
-
-    // Persist to disk
-    let _ = std::fs::create_dir_all(data_dir);
-    if let Err(e) = std::fs::write(&id_file, &id) {
-        eprintln!("[WARN] Could not persist device ID to {}: {}", id_file.display(), e);
-    }
-
-    id
+    let random_part: u32 = rand::thread_rng().gen();
+    format!("GHD-{:x}-{:x}", timestamp, random_part)
 }
 
 #[cfg(test)]
@@ -1089,28 +1320,15 @@ mod tests {
         let id1 = generate_device_id();
         let id2 = generate_device_id();
 
-        // Format: "GHD-" + 32 hex chars = 36 total
-        assert!(id1.starts_with("GHD-"), "id1 missing GHD- prefix: {}", id1);
-        assert_eq!(id1.len(), 36, "expected 36 chars, got {}", id1.len());
-
-        // Cryptographic randomness → collision probability is negligible (2^-128)
-        assert_ne!(id1, id2, "two generated IDs should differ");
-    }
-
-    #[test]
-    fn test_load_or_generate_device_id_persistence() {
-        let dir = std::env::temp_dir().join(format!("ghd_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let id1 = load_or_generate_device_id(&dir);
-        let id2 = load_or_generate_device_id(&dir);
-
-        // Both calls should return the same persisted ID
-        assert_eq!(id1, id2, "persisted ID should be identical across calls");
+        // Vérifier format
         assert!(id1.starts_with("GHD-"));
-        assert_eq!(id1.len(), 36);
+        assert!(id2.starts_with("GHD-"));
 
-        std::fs::remove_dir_all(&dir).ok();
+        // Vérifier longueur minimale (GHD- + timestamp hex + - + random hex)
+        assert!(id1.len() > 12);
+
+        // IDs doivent être différents grâce à la composante aléatoire
+        assert_ne!(id1, id2);
     }
 
     #[tokio::test]
@@ -1143,15 +1361,17 @@ mod tests {
 
     #[test]
     fn test_signal_message_serialization() {
+        // Test sérialisation Register (SignalMessage est un struct, pas un enum)
         let msg = SignalMessage::register("GHD-test123".to_string());
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("Register"));
         assert!(json.contains("GHD-test123"));
 
+        // Test désérialisation
         let deserialized: SignalMessage = serde_json::from_str(&json).unwrap();
         assert!(deserialized.is_type("Register"));
-        assert_eq!(deserialized.get_str("device_id").as_deref(), Some("GHD-test123"));
+        assert_eq!(deserialized.get_str("device_id").unwrap(), "GHD-test123");
     }
 
     #[test]

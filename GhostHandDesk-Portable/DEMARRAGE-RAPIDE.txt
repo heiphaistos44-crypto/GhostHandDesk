@@ -1,0 +1,149 @@
+========================================
+  GhostHandDesk v0.2.0 - Démarrage Rapide
+========================================
+
+🚀 LANCEMENT EN 1 CLIC :
+
+  Double-cliquez sur : LANCER-GHOSTHANDDESK.bat
+
+  ✅ Le script lance automatiquement :
+     1. Serveur de signaling (port 9000)
+     2. Application GhostHandDesk
+
+========================================
+
+⚠️ IMPORTANT :
+
+  NE PAS lancer directement ghosthanddesk-tauri.exe
+  (Le serveur doit être actif d'abord !)
+
+  Utilisez toujours LANCER-GHOSTHANDDESK.bat
+
+========================================
+
+🔧 QUE SE PASSE-T-IL AU LANCEMENT ?
+
+  1️⃣ Le script vérifie si le serveur est déjà lancé
+  2️⃣ Si non, il démarre signaling-server.exe
+  3️⃣ Attente 2 secondes (initialisation serveur)
+  4️⃣ Lancement de ghosthanddesk-tauri.exe
+  5️⃣ L'interface s'affiche avec votre Device ID
+
+========================================
+
+📱 VOTRE DEVICE ID :
+
+  Format : GHD-xxxxxxxxxxxx
+
+  Ce Device ID identifie votre machine.
+  Partagez-le avec l'autre PC pour se connecter.
+
+========================================
+
+🔗 CONNEXION À UN AUTRE PC :
+
+  1. Lancez LANCER-GHOSTHANDDESK.bat sur les 2 PCs
+  2. Notez le Device ID de chaque PC
+  3. Sur PC1, entrez le Device ID de PC2
+  4. Cliquez "Connect"
+  5. Le streaming démarre automatiquement
+
+========================================
+
+🛑 ARRÊT :
+
+  Méthode 1 (Recommandée) :
+    - Fermez l'application Tauri
+    - Revenez à la fenêtre du script
+    - Appuyez sur une touche pour arrêter le serveur
+
+  Méthode 2 (Force) :
+    - Ouvrez le Gestionnaire des tâches
+    - Terminez les processus :
+      • ghosthanddesk-tauri.exe
+      • signaling-server.exe
+
+========================================
+
+🐛 DÉPANNAGE :
+
+  Erreur "Connexion refusée" :
+    ➜ Le serveur n'est pas lancé
+    ➜ Utilisez LANCER-GHOSTHANDDESK.bat
+
+  Erreur "Port déjà utilisé" :
+    ➜ Un autre serveur utilise le port 9000
+    ➜ Modifiez server_port.txt
+    ➜ OU tuez le processus : taskkill /F /IM signaling-server.exe
+
+  Certificats manquants :
+    ➜ Le serveur les génère automatiquement
+    ➜ Vérifiez le dossier : ./certs/
+
+  Pas de Device ID affiché :
+    ➜ Attendez 2-3 secondes après le démarrage
+    ➜ Vérifiez les logs : ./logs/audit.jsonl
+
+========================================
+
+📂 STRUCTURE DU PACKAGE :
+
+  LANCER-GHOSTHANDDESK.bat    ← Script de lancement principal
+  ghosthanddesk-tauri.exe      ← Application (22 MB)
+  signaling-server.exe         ← Serveur (9.7 MB)
+  server_port.txt              ← Configuration port (9000)
+  README.txt                   ← Documentation complète
+  DEMARRAGE-RAPIDE.txt         ← Ce fichier
+  certs/                       ← Certificats TLS (auto-générés)
+  logs/                        ← Logs d'audit
+  data/                        ← Historique connexions
+
+========================================
+
+🔒 SÉCURITÉ :
+
+  ✅ Chiffrement E2E : X25519 + AES-256-GCM (bout en bout)
+  ✅ Touches système bloquées (Win+R, Ctrl+Alt+Del)
+  ✅ Validation stricte des entrées
+  ✅ Rate limiting anti-DoS
+  ✅ Logs d'audit automatiques
+
+  ⚠️ TLS désactivé en mode portable :
+     → Connexions localhost uniquement (pas de réseau externe)
+     → Pour production réseau, activez TLS dans le serveur
+
+========================================
+
+📊 SURVEILLANCE :
+
+  Logs en temps réel :
+    Ouvrez : logs\audit.jsonl
+
+  Statistiques serveur :
+    Ouvrez : http://localhost:9000/stats
+    (uniquement si serveur lancé)
+
+========================================
+
+💡 ASTUCES :
+
+  • Le Device ID change à chaque lancement
+  • Les favoris sont sauvegardés dans data/
+  • Logs nettoyés automatiquement (>30 jours)
+  • Qualité vidéo s'ajuste automatiquement
+  • Portable à 100% : aucune trace sur le PC
+
+========================================
+
+🆘 BESOIN D'AIDE ?
+
+  Consultez :
+    - README.txt (documentation complète)
+    - logs/audit.jsonl (logs détaillés)
+    - PROJET-TERMINE.md (guide technique)
+
+========================================
+Version : 0.2.0
+Statut : PRODUCTION-READY ✅
+Tests : 54/54 PASSÉS ✅
+========================================

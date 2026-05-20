@@ -11,6 +11,14 @@ pub trait VideoEncoder: Send + Sync {
 
     /// Get encoder info
     fn get_info(&self) -> EncoderInfo;
+
+    /// Ajuster la qualité dynamiquement (utilisé par adaptive bitrate)
+    /// Default: no-op pour les encodeurs qui ne supportent pas l'ajustement
+    fn adjust_quality(&mut self, _quality: u8) {}
+
+    /// Changer la résolution cible de downscale
+    /// None = résolution native (pas de downscale), Some(w) = downscale à cette largeur
+    fn set_target_width(&mut self, _width: Option<u32>) {}
 }
 
 /// Encoded frame data
@@ -38,21 +46,36 @@ pub struct EncoderInfo {
 pub struct ImageEncoder {
     quality: u8,
     info: EncoderInfo,
+    /// Résolution cible pour le downscale (None = natif, Some(w) = downscale à w pixels de large)
+    target_width: Option<u32>,
 }
 
 impl ImageEncoder {
     pub fn new(width: u32, height: u32, framerate: u32) -> Result<Self> {
         Ok(Self {
-            quality: 80,
+            quality: 55, // Qualité optimisée pour faible latence
             info: EncoderInfo {
-                codec: VideoCodec::H264, // Not really H264, but placeholder
+                codec: VideoCodec::JPEG,
                 width,
                 height,
                 framerate,
                 bitrate: 0,
                 hardware_accelerated: false,
             },
+            target_width: Some(1280), // Default: downscale à 720p
         })
+    }
+
+    /// Ajuster dynamiquement la qualité JPEG (1-100)
+    /// Utilisé pour adaptive bitrate basé sur les conditions réseau
+    pub fn set_quality(&mut self, quality: u8) {
+        self.quality = quality.clamp(10, 100); // Limiter entre 10 et 100
+        debug!("Qualité JPEG ajustée: {}", self.quality);
+    }
+
+    /// Obtenir la qualité actuelle
+    pub fn get_quality(&self) -> u8 {
+        self.quality
     }
 }
 
@@ -84,8 +107,29 @@ impl VideoEncoder for ImageEncoder {
             }
         };
 
-        // Convert RGBA to RGB (JPEG doesn't support alpha)
-        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+        // Convert RGBA to DynamicImage for potential downscale
+        let dynamic_img = image::DynamicImage::ImageRgba8(img);
+
+        // PERF: Downscale si target_width est défini et source est plus large
+        let (final_img, out_width, out_height) = if let Some(tw) = self.target_width {
+            if frame.width > tw {
+                let scale = tw as f64 / frame.width as f64;
+                let new_h = (frame.height as f64 * scale) as u32;
+                let resized = dynamic_img.resize_exact(tw, new_h, image::imageops::FilterType::Nearest);
+                let w = resized.width();
+                let h = resized.height();
+                (resized.to_rgb8(), w, h)
+            } else {
+                let w = dynamic_img.width();
+                let h = dynamic_img.height();
+                (dynamic_img.to_rgb8(), w, h)
+            }
+        } else {
+            // Natif : pas de downscale
+            let w = dynamic_img.width();
+            let h = dynamic_img.height();
+            (dynamic_img.to_rgb8(), w, h)
+        };
 
         // Encode to JPEG
         let mut buffer = Vec::new();
@@ -93,9 +137,9 @@ impl VideoEncoder for ImageEncoder {
 
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, self.quality)
             .encode(
-                &rgb_img,
-                frame.width,
-                frame.height,
+                &final_img,
+                out_width,
+                out_height,
                 image::ExtendedColorType::Rgb8,
             )
             .map_err(|e| {
@@ -106,13 +150,22 @@ impl VideoEncoder for ImageEncoder {
             data: buffer,
             timestamp: frame.timestamp,
             is_keyframe: true, // JPEG frames are always keyframes
-            width: frame.width,
-            height: frame.height,
+            width: out_width,
+            height: out_height,
         })
     }
 
     fn get_info(&self) -> EncoderInfo {
         self.info.clone()
+    }
+
+    fn adjust_quality(&mut self, quality: u8) {
+        self.set_quality(quality);
+    }
+
+    fn set_target_width(&mut self, width: Option<u32>) {
+        self.target_width = width;
+        info!("Target width changé: {:?}", width);
     }
 }
 
@@ -156,6 +209,9 @@ impl FFmpegEncoder {
             VideoCodec::VP8 => "libvpx",
             VideoCodec::VP9 => "libvpx-vp9",
             VideoCodec::AV1 => "libaom-av1",
+            VideoCodec::JPEG => return Err(GhostHandError::VideoEncoding(
+                "JPEG n'est pas supporté par FFmpegEncoder, utiliser ImageEncoder".to_string()
+            )),
         };
 
         let codec_id = match codec {
@@ -164,6 +220,7 @@ impl FFmpegEncoder {
             VideoCodec::VP8 => ffmpeg::codec::Id::VP8,
             VideoCodec::VP9 => ffmpeg::codec::Id::VP9,
             VideoCodec::AV1 => ffmpeg::codec::Id::AV1,
+            VideoCodec::JPEG => unreachable!(),
         };
 
         // 3. Trouver l'encodeur
@@ -404,8 +461,9 @@ mod tests {
 
         let encoded = encoder.encode(&frame).await?;
         assert!(!encoded.data.is_empty());
-        assert_eq!(encoded.width, 1920);
-        assert_eq!(encoded.height, 1080);
+        // Downscale: 1920x1080 → 1280x720
+        assert_eq!(encoded.width, 1280);
+        assert_eq!(encoded.height, 720);
 
         Ok(())
     }
@@ -419,6 +477,7 @@ mod tests {
             VideoCodec::VP8,
             VideoCodec::VP9,
             VideoCodec::AV1,
+            VideoCodec::JPEG,
         ];
 
         for codec in codecs {
@@ -429,6 +488,7 @@ mod tests {
                     | VideoCodec::VP8
                     | VideoCodec::VP9
                     | VideoCodec::AV1
+                    | VideoCodec::JPEG
             ));
         }
     }

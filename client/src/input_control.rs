@@ -1,13 +1,40 @@
 use crate::error::{GhostHandError, Result};
+use crate::audit::{audit_log, AuditEvent, AuditLevel};
 use enigo::{
     Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+// WHITELIST SÉCURITÉ: Touches système bloquées pour prévenir les actions dangereuses
+// Ces touches sont bloquées indépendamment des modifiers
+const BLOCKED_KEYS: &[&str] = &[
+    // Touches Windows système
+    "meta",       // Touche Windows seule
+    "super",      // Alias pour Meta
+    "windows",    // Alias pour Meta
+    "command",    // Alias pour Meta (macOS)
+];
+
+// Combinaisons de touches bloquées (modifier + touche)
+const BLOCKED_COMBINATIONS: &[(&str, &str)] = &[
+    // Windows dangereuses
+    ("meta", "r"),       // Win+R (Exécuter)
+    ("meta", "x"),       // Win+X (Menu système)
+    ("meta", "l"),       // Win+L (Verrouiller)
+    ("meta", "d"),       // Win+D (Bureau) - Désactivé pour éviter distraction
+    ("ctrl", "alt"),     // Ctrl+Alt (préfixe pour Ctrl+Alt+Del)
+
+    // Shortcuts système critiques
+    ("alt", "f4"),       // Alt+F4 (Fermer application)
+    ("ctrl", "shift"),   // Ctrl+Shift+Esc combo (si suivi de Esc)
+];
+
 /// Input control manager for keyboard and mouse events
 pub struct InputController {
     enigo: Enigo,
+    screen_width: i32,
+    screen_height: i32,
 }
 
 /// Represents a mouse event
@@ -45,23 +72,58 @@ pub struct KeyModifiers {
 }
 
 impl InputController {
-    /// Create a new input controller
+    /// Vérifier si une touche est bloquée par la whitelist de sécurité
+    pub fn is_key_blocked(key: &str, modifiers: &KeyModifiers) -> bool {
+        let key_lower = key.to_lowercase();
+
+        // Bloquer les touches système individuelles
+        if BLOCKED_KEYS.contains(&key_lower.as_str()) {
+            return true;
+        }
+
+        // Bloquer les combinaisons dangereuses
+        for (modifier, blocked_key) in BLOCKED_COMBINATIONS {
+            let key_matches = key_lower == *blocked_key;
+            let modifier_active = match *modifier {
+                "meta" => modifiers.meta,
+                "ctrl" => modifiers.ctrl,
+                "alt" => modifiers.alt,
+                "shift" => modifiers.shift,
+                _ => false,
+            };
+
+            if key_matches && modifier_active {
+                return true;
+            }
+        }
+
+        // Bloquer Ctrl+Alt+Del spécifiquement
+        if modifiers.ctrl && modifiers.alt && (key_lower == "delete" || key_lower == "del") {
+            return true;
+        }
+
+        false
+    }
+
+    /// Create a new input controller with default resolution
     pub fn new() -> Result<Self> {
+        Self::new_with_resolution(3840, 2160)
+    }
+
+    /// Create a new input controller with specific screen resolution
+    pub fn new_with_resolution(screen_width: i32, screen_height: i32) -> Result<Self> {
         let enigo = Enigo::new(&Settings::default()).map_err(|e| {
             GhostHandError::InputControl(format!("Failed to initialize input control: {}", e))
         })?;
 
-        Ok(Self { enigo })
+        Ok(Self { enigo, screen_width, screen_height })
     }
 
-    /// Obtenir la résolution totale de l'écran (approximation)
-    /// En multi-écrans, retourne une estimation basée sur le capturer
-    fn get_screen_resolution() -> (i32, i32) {
-        // TODO: Obtenir la vraie résolution multi-écrans
-        // Pour l'instant, utiliser une résolution par défaut raisonnable
-        // En production, il faudrait interroger le système pour obtenir
-        // la taille totale de l'espace d'écrans virtuels
-        (3840, 2160) // 4K par défaut
+    /// Update the screen resolution dynamically
+    pub fn set_resolution(&mut self, width: i32, height: i32) {
+        self.screen_width = width;
+        self.screen_height = height;
+        debug!("InputController resolution updated: {}x{}", width, height);
     }
 
     /// Handle a mouse event
@@ -69,7 +131,7 @@ impl InputController {
         match event {
             MouseEvent::Move { x, y } => {
                 // Normaliser les coordonnées pour éviter les débordements
-                let (max_width, max_height) = Self::get_screen_resolution();
+                let (max_width, max_height) = (self.screen_width, self.screen_height);
                 let clamped_x = x.max(0).min(max_width - 1);
                 let clamped_y = y.max(0).min(max_height - 1);
 
@@ -124,6 +186,30 @@ impl InputController {
 
     /// Handle a keyboard event with optional modifiers
     pub fn handle_keyboard_event(&mut self, event: KeyboardEvent, modifiers: KeyModifiers) -> Result<()> {
+        // SÉCURITÉ: Vérifier la whitelist avant d'exécuter
+        if let KeyboardEvent::Press { ref key } | KeyboardEvent::Release { ref key } = event {
+            if Self::is_key_blocked(key, &modifiers) {
+                warn!("⚠️  SÉCURITÉ: Touche bloquée par whitelist: {} (modifiers: {:?})", key, modifiers);
+
+                // AUDIT: Logger la tentative bloquée
+                audit_log(
+                    AuditLevel::Security,
+                    AuditEvent::SecurityError {
+                        error_code: "BLOCKED_KEY".to_string(),
+                        description: format!(
+                            "Tentative d'utilisation d'une touche système bloquée: {} (ctrl={}, alt={}, shift={}, meta={})",
+                            key, modifiers.ctrl, modifiers.alt, modifiers.shift, modifiers.meta
+                        ),
+                        peer_id: None,
+                    },
+                );
+
+                return Err(GhostHandError::InputControl(
+                    format!("Touche système bloquée pour sécurité: {}", key)
+                ));
+            }
+        }
+
         // Appliquer les modifiers AVANT la touche principale
         if modifiers.ctrl {
             self.enigo.key(Key::Control, Direction::Press).map_err(|e| {
@@ -338,5 +424,57 @@ mod tests {
         assert!(InputController::parse_key("enter").is_some());
         assert!(InputController::parse_key("ctrl").is_some());
         assert!(InputController::parse_key("f1").is_some());
+    }
+
+    #[test]
+    fn test_blocked_keys() {
+        let modifiers = KeyModifiers::default();
+
+        // Touche Windows seule doit être bloquée
+        assert!(InputController::is_key_blocked("meta", &modifiers));
+        assert!(InputController::is_key_blocked("super", &modifiers));
+        assert!(InputController::is_key_blocked("windows", &modifiers));
+
+        // Touches normales ne doivent pas être bloquées
+        assert!(!InputController::is_key_blocked("a", &modifiers));
+        assert!(!InputController::is_key_blocked("enter", &modifiers));
+    }
+
+    #[test]
+    fn test_blocked_combinations() {
+        // Win+R doit être bloqué
+        let mut modifiers = KeyModifiers::default();
+        modifiers.meta = true;
+        assert!(InputController::is_key_blocked("r", &modifiers));
+
+        // Win+L doit être bloqué
+        assert!(InputController::is_key_blocked("l", &modifiers));
+
+        // Ctrl+Alt+Delete doit être bloqué
+        let mut modifiers2 = KeyModifiers::default();
+        modifiers2.ctrl = true;
+        modifiers2.alt = true;
+        assert!(InputController::is_key_blocked("delete", &modifiers2));
+
+        // Alt+F4 doit être bloqué
+        let mut modifiers3 = KeyModifiers::default();
+        modifiers3.alt = true;
+        assert!(InputController::is_key_blocked("f4", &modifiers3));
+    }
+
+    #[test]
+    fn test_safe_combinations() {
+        // Ctrl+C doit être autorisé
+        let mut modifiers = KeyModifiers::default();
+        modifiers.ctrl = true;
+        assert!(!InputController::is_key_blocked("c", &modifiers));
+
+        // Ctrl+V doit être autorisé
+        assert!(!InputController::is_key_blocked("v", &modifiers));
+
+        // Alt+Tab devrait être autorisé (pas dans la liste bloquée)
+        let mut modifiers2 = KeyModifiers::default();
+        modifiers2.alt = true;
+        assert!(!InputController::is_key_blocked("tab", &modifiers2));
     }
 }

@@ -191,30 +191,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
-
-interface AppSettings {
-  server_url: string;
-  stun_servers: string[];
-}
-
-// Props
-const props = defineProps<{
-  initialSettings?: AppSettings | null;
-}>();
+import { ref, computed, onMounted } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 
 // Emits
 const emit = defineEmits<{
   close: [];
   update: [settings: any];
 }>();
-
-const DEFAULT_STUN = [
-  'stun:stun.l.google.com:19302',
-  'stun:stun1.l.google.com:19302',
-  'stun:stun.cloudflare.com:3478',
-  'stun:stun.services.mozilla.com',
-];
 
 // Settings state
 const settings = ref({
@@ -226,7 +210,10 @@ const settings = ref({
 
   // Réseau
   serverUrl: 'ws://localhost:9000/ws',
-  stunServers: [...DEFAULT_STUN],
+  stunServers: [
+    'stun:stun.l.google.com:19302',
+    'stun:stun1.l.google.com:19302',
+  ],
 
   // Performance
   hardwareAcceleration: false,
@@ -244,18 +231,6 @@ const settings = ref({
   encryptData: true,
 });
 
-// Initialiser depuis les paramètres persistés dès que la prop arrive
-watch(
-  () => props.initialSettings,
-  (s) => {
-    if (s) {
-      settings.value.serverUrl = s.server_url;
-      settings.value.stunServers = [...s.stun_servers];
-    }
-  },
-  { immediate: true }
-);
-
 // Computed pour STUN servers (textarea)
 const stunServersText = computed({
   get: () => settings.value.stunServers.join('\n'),
@@ -267,6 +242,26 @@ const stunServersText = computed({
   },
 });
 
+// Charger la config depuis le backend au montage
+onMounted(async () => {
+  try {
+    const config = await invoke<any>('get_config');
+    if (config) {
+      settings.value.serverUrl = config.server_url || settings.value.serverUrl;
+      settings.value.stunServers = config.stun_servers || settings.value.stunServers;
+      settings.value.codec = config.video_config?.codec || settings.value.codec;
+      settings.value.framerate = config.video_config?.framerate || settings.value.framerate;
+      settings.value.bitrate = config.video_config?.bitrate || settings.value.bitrate;
+      settings.value.hardwareAcceleration = config.video_config?.hardware_acceleration ?? settings.value.hardwareAcceleration;
+      settings.value.requirePassword = config.security_config?.require_auth ?? settings.value.requirePassword;
+      settings.value.encryptData = config.security_config?.e2e_encryption ?? settings.value.encryptData;
+      console.log('[SETTINGS] Config chargée depuis le backend');
+    }
+  } catch (error) {
+    console.warn('[SETTINGS] Impossible de charger la config backend:', error);
+  }
+});
+
 // Méthodes
 function handleClose() {
   emit('close');
@@ -275,7 +270,6 @@ function handleClose() {
 function handleSave() {
   emit('update', { ...settings.value });
   emit('close');
-  console.log('Paramètres sauvegardés:', settings.value);
 }
 
 function resetToDefaults() {
@@ -286,7 +280,10 @@ function resetToDefaults() {
       bitrate: 4000,
       quality: 80,
       serverUrl: 'ws://localhost:9000/ws',
-      stunServers: [...DEFAULT_STUN],
+      stunServers: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+      ],
       hardwareAcceleration: false,
       lowLatencyMode: true,
       adaptiveBitrate: true,

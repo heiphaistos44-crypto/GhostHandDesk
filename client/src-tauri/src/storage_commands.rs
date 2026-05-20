@@ -1,40 +1,79 @@
-use ghost_hand_client::storage::{global_storage, ConnectionHistory, KnownPeer, StorageStats};
+use ghost_hand_client::storage::{global_storage, ConnectionHistory};
 
+/// Obtenir l'historique des connexions
 #[tauri::command]
 pub fn get_connection_history(limit: Option<usize>) -> Result<Vec<ConnectionHistory>, String> {
-    let storage_mutex = global_storage().ok_or("Storage non initialisé")?;
-    let storage = storage_mutex.lock().map_err(|_| "Impossible de verrouiller le storage")?;
-    Ok(storage.get_connection_history(limit).into_iter().cloned().collect())
-}
-
-#[tauri::command]
-pub fn get_known_peers() -> Result<Vec<KnownPeer>, String> {
-    let storage_mutex = global_storage().ok_or("Storage non initialisé")?;
-    let storage = storage_mutex.lock().map_err(|_| "Impossible de verrouiller le storage")?;
-    Ok(storage.get_all_known_peers().into_iter().cloned().collect())
-}
-
-#[tauri::command]
-pub fn get_favorite_peers() -> Result<Vec<KnownPeer>, String> {
-    let storage_mutex = global_storage().ok_or("Storage non initialisé")?;
-    let storage = storage_mutex.lock().map_err(|_| "Impossible de verrouiller le storage")?;
-    Ok(storage.get_favorite_peers().into_iter().cloned().collect())
-}
-
-#[tauri::command]
-pub fn set_peer_favorite(peer_id: String, favorite: bool) -> Result<(), String> {
-    let storage_mutex = global_storage().ok_or("Storage non initialisé")?;
-    let mut storage = storage_mutex.lock().map_err(|_| "Impossible de verrouiller le storage")?;
-    if storage.set_peer_favorite(&peer_id, favorite) {
-        storage.save().map_err(|e| format!("Erreur sauvegarde: {}", e))
+    if let Some(storage_mutex) = global_storage() {
+        if let Ok(storage) = storage_mutex.lock() {
+            let history = storage.get_connection_history(limit);
+            Ok(history.into_iter().cloned().collect())
+        } else {
+            Err("Impossible de verrouiller le storage".to_string())
+        }
     } else {
-        Err(format!("Pair {} introuvable", peer_id))
+        Err("Storage non initialisé".to_string())
     }
 }
 
+/// Obtenir les pairs connus
 #[tauri::command]
-pub async fn get_storage_stats() -> Result<StorageStats, String> {
-    let storage_mutex = global_storage().ok_or("Storage non initialisé")?;
-    let storage = storage_mutex.lock().map_err(|_| "Impossible de verrouiller le storage")?;
-    Ok(storage.get_stats())
+pub fn get_known_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
+    if let Some(storage_mutex) = global_storage() {
+        if let Ok(storage) = storage_mutex.lock() {
+            let peers = storage.get_all_known_peers();
+            Ok(peers.into_iter().cloned().collect())
+        } else {
+            Err("Impossible de verrouiller le storage".to_string())
+        }
+    } else {
+        Err("Storage non initialisé".to_string())
+    }
+}
+
+/// Obtenir les pairs favoris
+#[tauri::command]
+pub fn get_favorite_peers() -> Result<Vec<ghost_hand_client::storage::KnownPeer>, String> {
+    if let Some(storage_mutex) = global_storage() {
+        if let Ok(storage) = storage_mutex.lock() {
+            let peers = storage.get_favorite_peers();
+            Ok(peers.into_iter().cloned().collect())
+        } else {
+            Err("Impossible de verrouiller le storage".to_string())
+        }
+    } else {
+        Err("Storage non initialisé".to_string())
+    }
+}
+
+/// Marquer un pair comme favori
+#[tauri::command]
+pub fn set_peer_favorite(peer_id: String, favorite: bool) -> Result<(), String> {
+    if let Some(storage_mutex) = global_storage() {
+        if let Ok(mut storage) = storage_mutex.lock() {
+            if storage.set_peer_favorite(&peer_id, favorite) {
+                storage.save().map_err(|e| format!("Erreur sauvegarde: {}", e))?;
+                Ok(())
+            } else {
+                Err(format!("Pair {} introuvable", peer_id))
+            }
+        } else {
+            Err("Impossible de verrouiller le storage".to_string())
+        }
+    } else {
+        Err("Storage non initialisé".to_string())
+    }
+}
+
+/// Obtenir les statistiques du storage
+#[tauri::command]
+pub async fn get_storage_stats() -> Result<ghost_hand_client::storage::StorageStats, String> {
+    if let Some(storage_mutex) = global_storage() {
+        if let Ok(storage) = storage_mutex.lock() {
+            Ok(storage.get_stats())
+        } else {
+            Err("Impossible de verrouiller le storage".to_string())
+        }
+    } else {
+        Err("Storage non initialisé".to_string())
+    }
 }

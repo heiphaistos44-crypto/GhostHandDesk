@@ -5,89 +5,74 @@ Cargo.lock
 *.pdb
 
 # Go
-server/bin/
-server/*.exe
 *.exe
-*.exe~
+!scripts/*.exe
 *.dll
 *.so
 *.dylib
 
-# TLS Certificates (auto-generated)
-server/certs/*.crt
-server/certs/*.key
-
-# Node.js / Vue
-client/ui/node_modules/
-client/ui/dist/
-client/ui/.vite/
-client/ui/dist-ssr/
-*.local
-
-# Logs
+# Logs & diagnostics (peuvent contenir des Device IDs, timestamps, IPs)
+logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+*.jsonl
+diag.log
+instance*.log
+build-output.log
 
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
+# Data & storage (contiennent l'historique de connexions, peers connus)
+data/
+*.db
+*.sqlite
+storage.json
+storage.backup.json
+
+# Certificats & clés privées
+certs/
+*.pem
+*.key
+*.crt
+
+# Ports & adresses réseau
+server_port.txt
+
+# IDEs
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
 
-# IDE
-.vscode/
-.idea/
-*.iml
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# OS
+.DS_Store
+Thumbs.db
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
 
 # Tauri
 client/src-tauri/target/
+client/ui/dist/
 
-# Build artifacts
-*.wasm
-*.wasm.map
+# Portable package (runtime data)
+GhostHandDesk-Portable/logs/
+GhostHandDesk-Portable/data/
+GhostHandDesk-Portable/certs/
+GhostHandDesk-Portable/Instance1/
+GhostHandDesk-Portable/Instance2/
+GhostHandDesk-Portable/_start_server.bat
+GhostHandDesk-Portable/*.exe
+GhostHandDesk-Portable/server_port.txt
 
-# Test results
-coverage/
-*.tgz
+# Build output
+server/signaling-server.exe
 
-# Backup files
-*.bak
-*.backup
+# Windows artifacts
+nul
 
-# Temporary files
-tmp/
-temp/
-.cache/
-
-# Config
-config.json
-*.pem
-
-# Claude Code
-.claude/
-
-# Generated portable package
-GhostHandDesk-Portable/
-GhostHandDesk-Portable.zip
-
-# Runtime data directories
-client/logs/
-client/data/
-logs/
-data/
+# Temp & scripts jetables
+*.tmp
+*.temp
+_start_server.bat
+_get_titles.ps1

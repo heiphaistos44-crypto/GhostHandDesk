@@ -47,13 +47,14 @@ pub struct VideoConfig {
     pub resolution: Option<(u32, u32)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VideoCodec {
     H264,
     H265,
     VP8,
     VP9,
     AV1,
+    JPEG,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,10 @@ pub struct SecurityConfig {
 
     /// Path to certificate (for custom CA)
     pub cert_path: Option<PathBuf>,
+
+    /// Password hash for incoming connection verification (PBKDF2)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
 }
 
 impl Default for Config {
@@ -156,6 +161,7 @@ impl Default for SecurityConfig {
             e2e_encryption: true,
             require_auth: true,
             cert_path: None,
+            password_hash: None,
         }
     }
 }

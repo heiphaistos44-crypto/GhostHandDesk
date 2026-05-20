@@ -1,0 +1,162 @@
+========================================
+  Guide de Test - Connexion P2P
+========================================
+
+🧪 PROCÉDURE DE TEST ÉTAPE PAR ÉTAPE
+
+========================================
+ÉTAPE 1 : Vérifier le Serveur
+========================================
+
+1️⃣ Ouvrez un terminal CMD
+
+2️⃣ Lancez le test serveur :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   TEST-SERVEUR.bat
+
+3️⃣ Vérifiez que vous voyez :
+   ✅ [MAIN] Serveur de signalement démarré sur :9000
+   ✅ [MAIN] Mode HTTP activé
+   ✅ Routes disponibles:
+      - ws://localhost:9000/ws
+
+4️⃣ Laissez ce terminal OUVERT
+
+========================================
+ÉTAPE 2 : Lancer Instance 1
+========================================
+
+1️⃣ Ouvrez un NOUVEAU terminal CMD
+
+2️⃣ Lancez l'application :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   ghosthanddesk-tauri.exe
+
+3️⃣ Attendez l'interface Tauri
+
+4️⃣ Notez le Device ID :
+   📱 Device ID Instance 1 : GHD-____________
+
+5️⃣ Vérifiez dans les logs du serveur :
+   ✅ [HANDLER] Nouveau client connecté: GHD-____________
+
+========================================
+ÉTAPE 3 : Lancer Instance 2
+========================================
+
+1️⃣ Ouvrez un 3ème terminal CMD
+
+2️⃣ Lancez l'application :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   ghosthanddesk-tauri.exe
+
+3️⃣ Attendez l'interface Tauri
+
+4️⃣ Notez le Device ID :
+   📱 Device ID Instance 2 : GHD-____________
+
+5️⃣ Vérifiez dans les logs du serveur :
+   ✅ [HANDLER] Nouveau client connecté: GHD-____________
+
+========================================
+ÉTAPE 4 : Connexion P2P
+========================================
+
+Sur Instance 1 :
+
+1️⃣ Cliquez sur "Initialize Session"
+   (Si pas déjà fait automatiquement)
+
+2️⃣ Dans le champ "Target Device ID" :
+   Entrez le Device ID de l'Instance 2
+
+3️⃣ Laissez le mot de passe vide (optionnel)
+
+4️⃣ Cliquez "Connect"
+
+5️⃣ Vérifiez les logs serveur :
+   ✅ [HANDLER] Message reçu de GHD-xxx: ConnectRequest
+   ✅ [HANDLER] Relais vers GHD-yyy
+
+Sur Instance 2 :
+
+6️⃣ Une demande de connexion devrait apparaître :
+   "Demande de connexion de : GHD-____________"
+
+7️⃣ Cliquez "Accepter"
+
+8️⃣ Vérifiez les logs serveur :
+   ✅ WebRTC Offer/Answer échangé
+   ✅ ICE Candidates relayés
+
+========================================
+ÉTAPE 5 : Vérification
+========================================
+
+✅ Instance 1 : "Connecté à GHD-xxx"
+✅ Instance 2 : "Connecté à GHD-yyy"
+✅ Logs serveur : Pas d'erreur
+
+========================================
+🐛 DÉPANNAGE
+========================================
+
+PROBLÈME : "Connexion en cours" qui ne finit jamais
+
+CAUSE POSSIBLE 1 : Serveur pas lancé
+   → Vérifiez TEST-SERVEUR.bat tourne
+   → Vérifiez port 9000 : netstat -ano | findstr 9000
+
+CAUSE POSSIBLE 2 : Serveur refuse connexion
+   → Vérifiez logs serveur pour erreurs
+   → Vérifiez DISABLE_ORIGIN_CHECK=true
+
+CAUSE POSSIBLE 3 : Firewall bloque
+   → Désactivez temporairement firewall
+   → Ou ajoutez exception pour signaling-server.exe
+
+PROBLÈME : Erreur "403 Forbidden"
+
+SOLUTION :
+   → Vérifiez DISABLE_ORIGIN_CHECK=true
+   → Recompilez serveur si nécessaire
+
+PROBLÈME : Erreur "Connection Refused"
+
+SOLUTION :
+   → Serveur pas lancé
+   → Lancez TEST-SERVEUR.bat d'abord
+
+========================================
+📊 LOGS À SURVEILLER
+========================================
+
+Terminal Serveur :
+   ✅ [HANDLER] Nouveau client connecté: GHD-xxx
+   ✅ [WS] Origine acceptée: tauri://localhost
+   ✅ [HANDLER] Message reçu de GHD-xxx: ConnectRequest
+   ✅ [HANDLER] Relais vers GHD-yyy
+
+Terminal Instance 1 :
+   ✅ [TAURI] Signaling initialisé
+   ✅ [TAURI] Connexion WebRTC établie
+   ✅ [NETWORK] WebRTC connected
+
+Terminal Instance 2 :
+   ✅ [TAURI] Demande de connexion reçue
+   ✅ [TAURI] Connexion acceptée
+   ✅ [NETWORK] WebRTC connected
+
+========================================
+🎯 SUCCÈS = TOUS LES ✅ CI-DESSUS
+========================================
+
+Si tous les checks passent :
+   → La connexion P2P fonctionne !
+   → Vous pouvez tester le streaming vidéo
+   → Vous pouvez tester le contrôle distant
+
+========================================
+Version : 0.2.0
+Test : Connexion P2P
+========================================

@@ -1,0 +1,70 @@
+========================================
+  NOUVEAU TEST AVEC LOGS DEBUG
+========================================
+
+🔍 Le serveur a été recompilé avec des logs très détaillés
+   pour voir EXACTEMENT ce qui se passe
+
+========================================
+PROCÉDURE
+========================================
+
+1️⃣ ARRÊTEZ tous les processus :
+   - Fermez toutes les fenêtres GhostHandDesk
+   - Fermez le serveur TEST-DEBUG.bat (Ctrl+C)
+
+2️⃣ RELANCEZ le serveur :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   TEST-DEBUG.bat
+
+3️⃣ RELANCEZ Instance 1 :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   LANCER-INSTANCE1.bat
+
+4️⃣ RELANCEZ Instance 2 :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   LANCER-INSTANCE2.bat
+
+5️⃣ SUR INSTANCE 2, cliquez "Connect" avec le Device ID de l'Instance 1
+
+6️⃣ SURVEILLEZ LE TERMINAL SERVEUR
+
+========================================
+LOGS À SURVEILLER
+========================================
+
+Vous DEVRIEZ maintenant voir :
+
+✅ [DEBUG GHD-xxx] Message brut reçu: {"type":"ConnectRequest","data":{...}}
+✅ [DEBUG GHD-xxx] Message parsé: Type=ConnectRequest
+✅ [CLIENT GHD-xxx] Message reçu: ConnectRequest
+✅ [HUB] Demande de connexion transférée...
+
+SI VOUS NE VOYEZ PAS LE PREMIER LOG [DEBUG ... Message brut reçu] :
+  → Le client n'envoie PAS le message
+  → PROBLÈME DANS LE CODE CLIENT
+
+SI VOUS VOYEZ "Message brut reçu" MAIS PAS "Message parsé" :
+  → Erreur de parsing JSON
+  → Le format du message ne correspond pas
+
+SI VOUS VOYEZ "Message parsé" MAIS PAS "Message reçu" :
+  → Le type de message n'est pas reconnu
+  → Problème dans handleMessage()
+
+========================================
+INFORMATIONS À ME FOURNIR
+========================================
+
+Copiez-moi TOUS les logs du Terminal Serveur
+depuis le moment où vous cliquez "Connect"
+
+En particulier :
+- Est-ce que vous voyez "[DEBUG ... Message brut reçu]" ?
+- Est-ce que vous voyez "[DEBUG ... Message parsé]" ?
+- Est-ce qu'il y a des erreurs ?
+
+========================================
+Version : 0.2.0
+Test : Debug Logs Détaillés
+========================================

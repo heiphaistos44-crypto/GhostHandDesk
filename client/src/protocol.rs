@@ -1,6 +1,29 @@
 /// Protocol de messages échangés via le data channel WebRTC
 use serde::{Deserialize, Serialize};
 
+/// Info d'un écran distant (pour multi-monitor)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayInfoProto {
+    pub id: u32,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+}
+
+/// Modifiers clavier transmis avec les événements KeyPress
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyModifiersProto {
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub meta: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ControlMessage {
@@ -36,6 +59,47 @@ pub enum ControlMessage {
     KeyPress {
         key: String,
         pressed: bool,
+        #[serde(default)]
+        modifiers: Option<KeyModifiersProto>,
+    },
+
+    // Clipboard sync
+    ClipboardSync {
+        content: String,
+    },
+
+    // File transfer
+    FileTransferStart {
+        id: String,
+        name: String,
+        size: u64,
+    },
+    FileTransferChunk {
+        id: String,
+        data: Vec<u8>,
+        offset: u64,
+    },
+    FileTransferComplete {
+        id: String,
+    },
+
+    // Chat
+    ChatMessage {
+        from: String,
+        text: String,
+        timestamp: u64,
+    },
+
+    // Display control
+    SelectDisplay {
+        display_id: u32,
+    },
+    /// Changer la résolution de streaming (width=0 → natif, sinon downscale à cette largeur)
+    SetResolution {
+        width: u32,
+    },
+    DisplayListResponse {
+        displays: Vec<DisplayInfoProto>,
     },
 
     // System

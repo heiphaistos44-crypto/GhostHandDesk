@@ -163,7 +163,7 @@ impl AuditLogger {
     pub fn log_with_metadata(&self, level: AuditLevel, event: AuditEvent, metadata: Option<serde_json::Value>) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         let entry = AuditEntry {
@@ -198,7 +198,9 @@ impl AuditLogger {
 
     /// Écrire une ligne dans le fichier de log avec rotation automatique
     fn write_to_file(&self, json: &str) -> std::io::Result<()> {
-        let mut file_guard = self.file.lock().unwrap();
+        let mut file_guard = self.file.lock().map_err(|e| {
+            std::io::Error::other(format!("Mutex poisoned: {}", e))
+        })?;
 
         if let Some(file) = file_guard.as_mut() {
             // Vérifier la taille du fichier
@@ -207,7 +209,9 @@ impl AuditLogger {
                 // Rotation : renommer le fichier actuel et créer un nouveau
                 drop(file_guard); // Libérer le lock
                 self.rotate_log()?;
-                file_guard = self.file.lock().unwrap();
+                file_guard = self.file.lock().map_err(|e| {
+                    std::io::Error::other(format!("Mutex poisoned: {}", e))
+                })?;
             }
 
             if let Some(file) = file_guard.as_mut() {
@@ -223,17 +227,21 @@ impl AuditLogger {
     fn rotate_log(&self) -> std::io::Result<()> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         let archived_name = format!("audit_{}.jsonl", timestamp);
-        let archived_path = self.log_path.parent().unwrap().join(archived_name);
+        let archived_path = self.log_path.parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No parent directory for log path"))?
+            .join(archived_name);
 
         // Fermer le fichier actuel
-        *self.file.lock().unwrap() = None;
+        *self.file.lock().map_err(|e| {
+            std::io::Error::other(format!("Mutex poisoned: {}", e))
+        })? = None;
 
         // Renommer
-        std::fs::rename(&self.log_path, archived_path)?;
+        std::fs::rename(&self.log_path, &archived_path)?;
 
         // Créer un nouveau fichier
         let new_file = OpenOptions::new()
@@ -241,9 +249,61 @@ impl AuditLogger {
             .append(true)
             .open(&self.log_path)?;
 
-        *self.file.lock().unwrap() = Some(new_file);
+        *self.file.lock().map_err(|e| {
+            std::io::Error::other(format!("Mutex poisoned: {}", e))
+        })? = Some(new_file);
 
-        info!("Audit log rotation effectuée");
+        info!("Audit log rotation effectuée: {}", archived_path.display());
+
+        // Nettoyer les vieux logs (>30 jours) après rotation
+        if let Err(e) = self.cleanup_old_logs() {
+            error!("Erreur nettoyage vieux logs: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Nettoyer les fichiers de logs plus vieux que 30 jours
+    fn cleanup_old_logs(&self) -> std::io::Result<()> {
+        let log_dir = self.log_path.parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "No parent directory"))?;
+
+        let now = std::time::SystemTime::now();
+        let retention_period = std::time::Duration::from_secs(30 * 24 * 60 * 60); // 30 jours
+
+        let mut deleted_count = 0;
+
+        // Parcourir tous les fichiers du dossier logs
+        for entry in std::fs::read_dir(log_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Vérifier que c'est un fichier audit archivé
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if filename.starts_with("audit_") && filename.ends_with(".jsonl") {
+                    // Vérifier l'âge du fichier
+                    if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(age) = now.duration_since(modified) {
+                                if age > retention_period {
+                                    // Supprimer le fichier
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        error!("Erreur suppression vieux log {}: {}", path.display(), e);
+                                    } else {
+                                        deleted_count += 1;
+                                        info!("Vieux log supprimé: {}", path.display());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if deleted_count > 0 {
+            info!("Nettoyage automatique: {} vieux logs supprimés", deleted_count);
+        }
 
         Ok(())
     }

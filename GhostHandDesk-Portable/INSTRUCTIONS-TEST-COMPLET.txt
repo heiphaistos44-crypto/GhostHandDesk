@@ -1,0 +1,147 @@
+========================================
+  TEST COMPLET CONNEXION P2P
+========================================
+
+🔍 OBJECTIF : Diagnostiquer pourquoi la connexion reste bloquée
+
+========================================
+ÉTAPE 1 : LANCER LE SERVEUR DEBUG
+========================================
+
+1️⃣ Ouvrez CMD #1
+
+2️⃣ Lancez :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   TEST-DEBUG.bat
+
+3️⃣ Vérifiez que vous voyez :
+   [MAIN] Serveur de signalement démarré sur :9000
+   [MAIN] Mode HTTP activé
+
+4️⃣ GARDEZ CE TERMINAL OUVERT ET VISIBLE
+   (Vous allez surveiller les logs en temps réel)
+
+========================================
+ÉTAPE 2 : LANCER INSTANCE 1
+========================================
+
+1️⃣ Ouvrez CMD #2
+
+2️⃣ Lancez :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   ghosthanddesk-tauri.exe
+
+3️⃣ Dans CMD #1 (serveur), vous DEVEZ voir :
+   [HUB] Client enregistré: GHD-xxxxxxxxxxxx (Total: 1)
+
+4️⃣ Dans l'interface Tauri, notez le Device ID :
+   📱 Instance 1 : GHD-____________
+
+5️⃣ Cliquez sur "Initialize Session" si ce n'est pas automatique
+
+========================================
+ÉTAPE 3 : LANCER INSTANCE 2
+========================================
+
+1️⃣ Ouvrez CMD #3
+
+2️⃣ Lancez :
+   cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+   ghosthanddesk-tauri.exe
+
+3️⃣ Dans CMD #1 (serveur), vous DEVEZ voir :
+   [HUB] Client enregistré: GHD-yyyyyyyyyyyy (Total: 2)
+
+4️⃣ Dans l'interface Tauri, notez le Device ID :
+   📱 Instance 2 : GHD-____________
+
+5️⃣ Cliquez sur "Initialize Session" si ce n'est pas automatique
+
+========================================
+ÉTAPE 4 : TENTER LA CONNEXION
+========================================
+
+Sur INSTANCE 1 :
+
+1️⃣ Dans le champ "Target Device ID" :
+   Entrez le Device ID de l'Instance 2
+
+2️⃣ Cliquez "Connect"
+
+3️⃣ ⚠️ SURVEILLEZ LE TERMINAL SERVEUR (CMD #1) ⚠️
+
+   Vous DEVRIEZ voir (dans l'ordre) :
+
+   ✅ [CLIENT GHD-xxx] Message reçu: ConnectRequest
+   ✅ [CLIENT GHD-xxx] Demande de connexion vers GHD-yyy
+   ✅ [HUB] Demande de connexion transférée de GHD-xxx vers GHD-yyy
+
+4️⃣ Si vous ne voyez PAS ces lignes :
+   → Le client n'envoie pas le ConnectRequest
+   → PROBLÈME DANS LE CODE CLIENT
+
+5️⃣ Si vous voyez ces lignes :
+   → Le serveur a bien relayé
+   → Vérifiez l'Instance 2
+
+Sur INSTANCE 2 :
+
+6️⃣ Une notification devrait apparaître :
+   "Demande de connexion de : GHD-xxx"
+
+7️⃣ Si vous ne voyez PAS la notification :
+   → Le client ne reçoit pas le message
+   → PROBLÈME DANS LE LISTENER CLIENT
+
+========================================
+📊 DIAGNOSTIC SELON LES LOGS
+========================================
+
+CAS 1 : Aucun log dans le serveur quand vous cliquez "Connect"
+   ❌ Le client n'envoie pas le message ConnectRequest
+   ➜ Problème : Code connect_to_device() dans main.rs
+   ➜ Vérifier : network.rs - fonction connect_to_device()
+
+CAS 2 : Logs serveur OK mais pas de notification sur Instance 2
+   ❌ Le client ne reçoit pas ou ne traite pas le message
+   ➜ Problème : Listener dans start_listening_for_requests()
+   ➜ Vérifier : receive_message() ne lit pas correctement
+
+CAS 3 : Notification apparaît mais erreur WebRTC
+   ✅ Signaling fonctionne !
+   ❌ Problème dans l'établissement WebRTC
+   ➜ Problème : Configuration ICE/STUN ou firewall
+
+CAS 4 : Tout fonctionne !
+   ✅ Connexion P2P établie
+   🎉 SUCCÈS
+
+========================================
+🐛 INFORMATIONS POUR DEBUG
+========================================
+
+Si ça ne fonctionne pas, copiez-moi :
+
+1. Les logs du serveur (CMD #1) depuis le démarrage
+
+2. Les logs de l'Instance 1 (CMD #2)
+
+3. Les logs de l'Instance 2 (CMD #3)
+
+4. À quelle étape ça bloque exactement
+
+5. Les Device IDs des deux instances
+
+========================================
+📝 NOTES IMPORTANTES
+========================================
+
+- NE fermez AUCUN terminal avant la fin du test
+- Surveillez le terminal serveur EN PERMANENCE
+- Notez EXACTEMENT ce qui apparaît (ou n'apparaît pas)
+- Les logs sont ESSENTIELS pour le diagnostic
+
+========================================
+Version : 0.2.0
+Test : Diagnostic Connexion P2P
+========================================

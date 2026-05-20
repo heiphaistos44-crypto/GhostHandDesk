@@ -1,0 +1,157 @@
+========================================
+  TEST CONNEXION P2P - PROCÉDURE FINALE
+========================================
+
+🎯 OBJECTIF : Connecter 2 instances et tester le P2P
+
+========================================
+PRÉPARATION (1 FOIS)
+========================================
+
+Les dossiers Instance1 et Instance2 ont été créés
+pour éviter les conflits de fichiers.
+
+Structure :
+  GhostHandDesk-Portable/
+  ├── Instance1/
+  │   └── ghosthanddesk-tauri.exe
+  ├── Instance2/
+  │   └── ghosthanddesk-tauri.exe
+  ├── TEST-DEBUG.bat
+  ├── LANCER-INSTANCE1.bat
+  └── LANCER-INSTANCE2.bat
+
+========================================
+ÉTAPE 1 : SERVEUR
+========================================
+
+Terminal 1 :
+  cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+  TEST-DEBUG.bat
+
+Attendez de voir :
+  ✅ [MAIN] Serveur de signalement démarré sur :9000
+
+========================================
+ÉTAPE 2 : INSTANCE 1
+========================================
+
+Terminal 2 :
+  cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+  LANCER-INSTANCE1.bat
+
+Vérifiez Terminal Serveur :
+  ✅ [HUB] Client enregistré: GHD-xxxxxxxxxxxx (Total: 1)
+
+Dans l'interface Tauri Instance 1 :
+  📱 Notez le Device ID : GHD-____________
+
+========================================
+ÉTAPE 3 : INSTANCE 2
+========================================
+
+Terminal 3 :
+  cd C:\Users\Momo\Documents\GhostHandDesk\GhostHandDesk-Portable
+  LANCER-INSTANCE2.bat
+
+Vérifiez Terminal Serveur :
+  ✅ [HUB] Client enregistré: GHD-yyyyyyyyyyyy (Total: 2)
+
+Dans l'interface Tauri Instance 2 :
+  📱 Notez le Device ID : GHD-____________
+
+========================================
+ÉTAPE 4 : CONNEXION
+========================================
+
+Sur INSTANCE 1 :
+
+1. Dans le champ "Target Device ID" :
+   Entrez le Device ID de l'Instance 2
+   Exemple : GHD-19c3844acd8
+
+2. Laissez le mot de passe vide
+
+3. Cliquez sur "Connect"
+
+4. ⚠️ SURVEILLEZ LE TERMINAL SERVEUR ⚠️
+
+   Vous DEVEZ voir apparaître :
+
+   ✅ [CLIENT GHD-xxx] Message reçu: ConnectRequest
+   ✅ [CLIENT GHD-xxx] Demande de connexion vers GHD-yyy
+   ✅ [HUB] Demande de connexion transférée de GHD-xxx vers GHD-yyy
+
+Sur INSTANCE 2 :
+
+5. Une notification devrait apparaître :
+   "Demande de connexion de : GHD-xxxxxxxxxxxx"
+
+6. Cliquez sur "Accepter"
+
+7. Dans le Terminal Serveur, vous devriez voir :
+   ✅ [CLIENT GHD-yyy] Message reçu: ConnectionAccepted
+   ✅ WebRTC Offer/Answer échangés
+   ✅ ICE Candidates relayés
+
+========================================
+RÉSULTAT ATTENDU
+========================================
+
+Instance 1 :
+  ✅ Status : "Connecté"
+  ✅ Affiche : "Connecté à GHD-yyy"
+
+Instance 2 :
+  ✅ Status : "Connecté"
+  ✅ Affiche : "Connecté à GHD-xxx"
+
+Terminal Serveur :
+  ✅ Logs de tous les échanges WebRTC
+  ✅ Aucune erreur
+
+========================================
+🐛 SI ÇA NE FONCTIONNE PAS
+========================================
+
+Cas 1 : Pas de logs "ConnectRequest" dans le serveur
+  → Le client n'envoie pas le message
+  → Copiez-moi les logs de l'Instance 1
+
+Cas 2 : Logs serveur OK mais pas de notification Instance 2
+  → Le client ne reçoit pas le message
+  → Copiez-moi les logs de l'Instance 2
+
+Cas 3 : Notification OK mais erreur WebRTC
+  → Problème ICE/STUN
+  → Copiez-moi TOUS les logs
+
+========================================
+📊 INFORMATIONS À ME FOURNIR SI ERREUR
+========================================
+
+1. Device ID Instance 1 : GHD-____________
+
+2. Device ID Instance 2 : GHD-____________
+
+3. TOUS les logs du Terminal Serveur
+   (depuis le début jusqu'à l'erreur)
+
+4. Ce qui se passe exactement quand vous
+   cliquez "Connect" sur Instance 1
+
+5. Est-ce qu'une notification apparaît
+   sur Instance 2 ? (Oui/Non)
+
+========================================
+🚀 C'EST PARTI !
+========================================
+
+Suivez les étapes dans l'ordre.
+Ne sautez aucune étape.
+Surveillez le Terminal Serveur en permanence.
+
+========================================
+Version : 0.2.0
+Test : Connexion P2P Complète
+========================================

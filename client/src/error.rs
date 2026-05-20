@@ -64,6 +64,15 @@ pub enum GhostHandError {
     #[error("Erreur de configuration: {0}")]
     Config(String),
 
+    #[error("Erreur de validation: {0}")]
+    Validation(String),
+
+    #[error("Rate limit atteint: {0}")]
+    RateLimit(String),
+
+    #[error("Erreur interne: {0}")]
+    Internal(String),
+
     // Formes avec codes d'erreur standardisés
     #[error("[{code}] Capture d'écran: {message}")]
     ScreenCaptureWithCode { code: String, message: String },

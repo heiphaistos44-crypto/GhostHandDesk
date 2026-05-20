@@ -91,12 +91,9 @@ async fn test_complete_encoding_pipeline() -> Result<()> {
 fn test_config_defaults() {
     let config = Config::default();
 
-    // Default is ws:// for local dev; WSS requires explicit CERT_FILE/KEY_FILE config
+    // Vérifier les valeurs par défaut
     assert!(!config.server_url.is_empty());
-    assert!(
-        config.server_url.starts_with("ws://") || config.server_url.starts_with("wss://"),
-        "server_url must be a WebSocket URL, got: {}", config.server_url
-    );
+    assert!(config.server_url.starts_with("ws://") || config.server_url.starts_with("wss://"));
     assert_eq!(config.video_config.framerate, 30);
     assert_eq!(config.video_config.bitrate, 4000);
     assert!(!config.stun_servers.is_empty());
