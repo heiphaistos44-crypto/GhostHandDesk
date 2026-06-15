@@ -1,8 +1,7 @@
 # GhostHandDesk
 ## Démonstration
 
-<video controls width="100%" preload="none">
-  <source src="https://media.heiphaistos.org/videos/ghosthanddesk.mp4" type="video/mp4">\n</video>\n
+<video src="https://media.heiphaistos.org/videos/ghosthanddesk.mp4" controls width="100%" preload="none"></video>\n
 [![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/heiphaistos44-crypto/GhostHandDesk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
