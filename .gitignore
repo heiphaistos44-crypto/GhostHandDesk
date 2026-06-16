@@ -55,16 +55,6 @@ dist/
 client/src-tauri/target/
 client/ui/dist/
 
-# Portable package (runtime data)
-GhostHandDesk-Portable/logs/
-GhostHandDesk-Portable/data/
-GhostHandDesk-Portable/certs/
-GhostHandDesk-Portable/Instance1/
-GhostHandDesk-Portable/Instance2/
-GhostHandDesk-Portable/_start_server.bat
-GhostHandDesk-Portable/*.exe
-GhostHandDesk-Portable/server_port.txt
-
 # Build output
 server/signaling-server.exe
 
@@ -76,3 +66,6 @@ nul
 *.temp
 _start_server.bat
 _get_titles.ps1
+
+# Artefacts de release (publiés via GitHub Releases, pas le repo)
+release/

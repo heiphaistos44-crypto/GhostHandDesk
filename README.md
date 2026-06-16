@@ -1,6 +1,6 @@
 # GhostHandDesk
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/heiphaistos44-crypto/GhostHandDesk)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/heiphaistos44-crypto/GhostHandDesk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Go](https://img.shields.io/badge/go-1.20+-00ADD8.svg)](https://golang.org/)
@@ -16,15 +16,7 @@ Un seul executable portable embarque le client (Tauri + Vue.js) et le serveur de
 
 ### Option 1 : Executable Portable (recommande)
 
-```bash
-# Construire le package portable
-BUILD-PORTABLE.bat
-
-# Lancer l'application
-GhostHandDesk-Portable/LANCER-GHOSTHANDDESK.bat
-```
-
-L'application demarre automatiquement le serveur de signalement embarque et ouvre l'interface.
+Telechargez `GhostHandDesk_0.4.0_portable_x64.exe` depuis les [releases GitHub](https://github.com/heiphaistos44-crypto/GhostHandDesk/releases) et double-cliquez. Aucune installation, aucun autre fichier requis : le serveur de signalement est embarque dans l'exe et demarre automatiquement.
 
 ### Option 2 : Depuis les sources
 
@@ -49,11 +41,7 @@ GhostHandDesk/
 ├── server/                     # Serveur de signalement (Go + WebSocket)
 │   ├── cmd/signaling/          # Point d'entree
 │   └── internal/signaling/     # Hub, handlers, rate limiting
-├── docs/                       # Documentation technique
-├── GhostHandDesk-Portable/     # Package portable (genere par le build)
-├── BUILD-PORTABLE.bat          # Script de build
-├── LANCER-APPLICATION.bat      # Lancement dev
-└── VERIFIER-PREREQUIS.bat      # Verification des outils
+└── docs/                       # Documentation technique
 ```
 
 ### Stack Technique
@@ -173,13 +161,12 @@ MIT License
 
 ## Utilisation sans VPS (P2P auto-heberge)
 
-1. **PC A** (hote) : extraire le ZIP, ouvrir port 9000 TCP, lancer `LANCER-GHOSTHANDDESK.bat`
-2. **PC B** : meme ZIP, dans Parametres → URL : `ws://<IP_PC_A>:9000/ws`
+1. **PC A** (hote) : copier `GhostHandDesk_0.4.0_portable_x64.exe`, ouvrir port 9000 TCP, lancer l'exe
+2. **PC B** : meme exe, dans Parametres → URL : `ws://<IP_PC_A>:9000/ws`
 3. Entrer le Device ID du PC A → Connecter
 
 ## Avec VPS public
 
-Lancer le serveur avec `DISABLE_ORIGIN_CHECK=true`.
 Configurer l'URL : `wss://votre-vps.example.com/ws`
 
 ---
