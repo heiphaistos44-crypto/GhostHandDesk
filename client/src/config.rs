@@ -87,32 +87,10 @@ pub struct SecurityConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        // Lire le port depuis la variable d'environnement (priorité 1) ou le fichier (priorité 2)
-        let port = std::env::var("GHD_SERVER_PORT")
-            .ok()
-            .or_else(|| {
-                // Lire depuis UN SEUL emplacement standardisé : à côté de l'exécutable
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|exe_path| {
-                        let port_file = exe_path.parent()?.join("server_port.txt");
-                        match std::fs::read_to_string(&port_file) {
-                            Ok(content) => Some(content.trim().to_string()),
-                            Err(e) => {
-                                tracing::warn!("Impossible de lire {}: {}", port_file.display(), e);
-                                None
-                            }
-                        }
-                    })
-            })
-            .unwrap_or_else(|| {
-                tracing::warn!("Port non trouvé (variable GHD_SERVER_PORT ou server_port.txt), utilisation du port par défaut 9000");
-                "9000".to_string()
-            });
-
-        // GHD_SERVER_URL takes precedence over port-based URL
+        // GHD_SERVER_URL permet un override (ex: mode LAN, ws://localhost:9000/ws)
+        // Par défaut : serveur VPS central, comme RustDesk/AnyDesk
         let server_url = std::env::var("GHD_SERVER_URL")
-            .unwrap_or_else(|_| format!("ws://localhost:{}/ws", port));
+            .unwrap_or_else(|_| "wss://ghd.heiphaistos.org/ws".to_string());
 
         Self {
             server_url,

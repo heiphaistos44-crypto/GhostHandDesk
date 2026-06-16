@@ -22,6 +22,7 @@ use ghost_hand_client::streaming::{Streamer, Receiver, InputHandler};
 use ghost_hand_client::screen_capture::{self, ScreenCapturer};
 use ghost_hand_client::video_encoder::{self, VideoEncoder};
 use base64::Engine;
+use std::os::windows::process::CommandExt;
 // Fonction de diagnostic - écrit dans un fichier log
 fn diag_log(msg: &str) {
     use std::io::Write;
@@ -136,6 +137,7 @@ fn start_embedded_server() -> Option<(std::process::Child, std::path::PathBuf)> 
             .env("SERVER_HOST", format!(":{}", port))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .spawn()
         {
             Ok(mut child) => {
@@ -1418,10 +1420,6 @@ async fn send_file(
 fn main() {
     diag_log("=== APPLICATION DÉMARRÉE ===");
 
-    // Lancer le serveur de signalement embarqué
-    let server_process: Arc<std::sync::Mutex<Option<(std::process::Child, std::path::PathBuf)>>> =
-        Arc::new(std::sync::Mutex::new(start_embedded_server()));
-
     // Calculer data_dir en premier (utilisé pour Device ID + storage + settings)
     let data_dir = std::env::current_exe()
         .ok()
@@ -1448,6 +1446,19 @@ fn main() {
         let mut cfg = Config::default();
         saved.apply_to_config(&mut cfg);
         cfg
+    };
+
+    // Lancer le serveur local uniquement si l'URL pointe sur localhost (mode LAN/auto-hébergé)
+    // Par défaut (URL VPS), aucun serveur local n'est lancé — comportement RustDesk/AnyDesk
+    let server_process: Arc<std::sync::Mutex<Option<(std::process::Child, std::path::PathBuf)>>> = {
+        let is_local = config.server_url.contains("localhost") || config.server_url.contains("127.0.0.1");
+        Arc::new(std::sync::Mutex::new(if is_local {
+            diag_log("[SERVER] Mode local — lancement du serveur embarqué...");
+            start_embedded_server()
+        } else {
+            diag_log(&format!("[SERVER] Mode VPS — connexion directe vers {}", config.server_url));
+            None
+        }))
     };
 
     // Initialiser le logger d'audit
