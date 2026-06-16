@@ -65,9 +65,8 @@ const inputText = ref('');
 const unreadCount = ref(0);
 const messagesRef = ref<HTMLDivElement | null>(null);
 
-// Recevoir les messages de chat via CustomEvent
-function handleChatMessage(event: Event) {
-  const detail = (event as CustomEvent).detail;
+// Recevoir les messages de chat via l'API d'événements typés Tauri
+function handleChatMessage(detail: ChatMsg) {
   messages.value.push({
     from: detail.from,
     text: detail.text,

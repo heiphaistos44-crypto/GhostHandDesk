@@ -118,6 +118,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import ChatPanel from './ChatPanel.vue';
 
 // Props
@@ -195,10 +196,10 @@ const drawRect = ref({ x: 0, y: 0, w: 0, h: 0 });
 let frameCount = 0;
 let lastFpsUpdate = Date.now();
 let fpsIntervalId: ReturnType<typeof setInterval> | null = null;
-let videoEventHandler: ((event: Event) => void) | null = null;
-let chatEventHandler: ((event: Event) => void) | null = null;
-let clipboardEventHandler: ((event: Event) => void) | null = null;
-let displayListHandler: ((event: Event) => void) | null = null;
+let videoUnlisten: UnlistenFn | null = null;
+let chatUnlisten: UnlistenFn | null = null;
+let clipboardUnlisten: UnlistenFn | null = null;
+let displayListUnlisten: UnlistenFn | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let lastMouseMoveTime = 0; // Throttle MouseMove à 60Hz
 let lastFrameTime = 0; // Pour mesure latence inter-frame
@@ -212,10 +213,9 @@ onMounted(async () => {
   // Focus sur le canvas pour les événements clavier
   canvasRef.value?.focus();
 
-  // Écouter les frames vidéo via DOM CustomEvent
-  // (window.eval() + CustomEvent car le Tauri event system ne fonctionne pas)
-  videoEventHandler = ((event: Event) => {
-    const detail = (event as CustomEvent).detail;
+  // Écouter les frames vidéo via l'API d'événements typés Tauri (pas d'eval/injection JS)
+  videoUnlisten = await listen<VideoFramePayload & { data: string }>('ghosthand-video-frame', (event) => {
+    const detail = event.payload;
     // Décoder base64 en Uint8Array
     const binaryString = atob(detail.data);
     const bytes = new Uint8Array(binaryString.length);
@@ -229,36 +229,32 @@ onMounted(async () => {
       timestamp: detail.timestamp,
     });
   });
-  window.addEventListener('ghosthand-video-frame', videoEventHandler);
-  console.log('Listener vidéo configuré (CustomEvent)');
+  console.log('Listener vidéo configuré (Tauri event)');
 
-  // Écouter les messages de chat via CustomEvent
-  chatEventHandler = ((event: Event) => {
+  // Écouter les messages de chat via l'API d'événements typés Tauri
+  chatUnlisten = await listen<{ from: string; text: string; timestamp: number }>('ghosthand-chat-message', (event) => {
     if (chatPanelRef.value) {
-      chatPanelRef.value.handleChatMessage(event);
+      chatPanelRef.value.handleChatMessage(event.payload);
     }
   });
-  window.addEventListener('ghosthand-chat-message', chatEventHandler);
 
-  // Écouter les sync clipboard via CustomEvent
-  clipboardEventHandler = ((event: Event) => {
-    const { content } = (event as CustomEvent).detail;
+  // Écouter les sync clipboard via l'API d'événements typés Tauri
+  clipboardUnlisten = await listen<{ content: string }>('ghosthand-clipboard-sync', (event) => {
+    const { content } = event.payload;
     if (content) {
       invoke('set_clipboard', { content }).catch(() => {});
     }
   });
-  window.addEventListener('ghosthand-clipboard-sync', clipboardEventHandler);
 
-  // Écouter la liste d'écrans distants via CustomEvent
-  displayListHandler = ((event: Event) => {
-    const list = (event as CustomEvent).detail;
+  // Écouter la liste d'écrans distants via l'API d'événements typés Tauri
+  displayListUnlisten = await listen<DisplayInfo[]>('ghosthand-display-list', (event) => {
+    const list = event.payload;
     if (Array.isArray(list)) {
       displays.value = list;
       updateSourceResolution();
       console.log('[VIEWER] Display list reçue:', list.length, 'écrans');
     }
   });
-  window.addEventListener('ghosthand-display-list', displayListHandler);
 
   // Observer les changements de taille du container
   if (containerRef.value) {
@@ -273,17 +269,17 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (videoEventHandler) {
-    window.removeEventListener('ghosthand-video-frame', videoEventHandler);
+  if (videoUnlisten) {
+    videoUnlisten();
   }
-  if (chatEventHandler) {
-    window.removeEventListener('ghosthand-chat-message', chatEventHandler);
+  if (chatUnlisten) {
+    chatUnlisten();
   }
-  if (clipboardEventHandler) {
-    window.removeEventListener('ghosthand-clipboard-sync', clipboardEventHandler);
+  if (clipboardUnlisten) {
+    clipboardUnlisten();
   }
-  if (displayListHandler) {
-    window.removeEventListener('ghosthand-display-list', displayListHandler);
+  if (displayListUnlisten) {
+    displayListUnlisten();
   }
   if (fpsIntervalId) {
     clearInterval(fpsIntervalId);

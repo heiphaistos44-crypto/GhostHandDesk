@@ -96,6 +96,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import ConnectDialog from './components/ConnectDialog.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
 import SettingsPanel from './components/SettingsPanel.vue';
@@ -125,7 +126,9 @@ const networkInfo = ref<{local_ip: string; port: string; server_url: string}>({
 // Preview local (PC contrôlé)
 const previewCanvasRef = ref<HTMLCanvasElement | null>(null);
 const previewActive = ref(false);
-let previewHandler: ((event: Event) => void) | null = null;
+let previewUnlisten: UnlistenFn | null = null;
+let connectRequestUnlisten: UnlistenFn | null = null;
+let streamingErrorUnlisten: UnlistenFn | null = null;
 
 // États pour la popup de demande de connexion
 const connectionRequestVisible = ref(false);
@@ -148,16 +151,23 @@ const statusText = computed(() => {
 });
 
 // Preview local : écouter les frames quand contrôlé
+interface LocalPreviewPayload {
+  data: string;
+  width: number;
+  height: number;
+  timestamp: number;
+}
+
 watch(isControlled, (val) => {
   if (val) {
-    // Setup le listener pour les frames du preview local
-    previewHandler = ((event: Event) => {
+    // Setup le listener Tauri pour les frames du preview local (événement typé, pas d'eval)
+    listen<LocalPreviewPayload>('ghosthand-local-preview', (event) => {
       const canvas = previewCanvasRef.value;
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      const detail = (event as CustomEvent).detail;
+      const detail = event.payload;
       const binaryString = atob(detail.data);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
@@ -183,21 +193,28 @@ watch(isControlled, (val) => {
         bmp.close();
         if (!previewActive.value) previewActive.value = true;
       }).catch(() => {});
+    }).then((unlisten) => {
+      previewUnlisten = unlisten;
     });
-    window.addEventListener('ghosthand-local-preview', previewHandler);
   } else {
     // Cleanup
-    if (previewHandler) {
-      window.removeEventListener('ghosthand-local-preview', previewHandler);
-      previewHandler = null;
+    if (previewUnlisten) {
+      previewUnlisten();
+      previewUnlisten = null;
     }
     previewActive.value = false;
   }
 });
 
 onUnmounted(() => {
-  if (previewHandler) {
-    window.removeEventListener('ghosthand-local-preview', previewHandler);
+  if (previewUnlisten) {
+    previewUnlisten();
+  }
+  if (connectRequestUnlisten) {
+    connectRequestUnlisten();
+  }
+  if (streamingErrorUnlisten) {
+    streamingErrorUnlisten();
   }
 });
 
@@ -220,13 +237,17 @@ onMounted(async () => {
     // Démarrer l'écoute des demandes de connexion entrantes
     await invoke('start_listening_for_requests');
 
-    // Écouter les demandes de connexion via DOM CustomEvent
-    // (window.eval() + CustomEvent car le Tauri event system ne fonctionne pas)
-    window.addEventListener('ghosthand-connect-request', ((event: CustomEvent) => {
-      console.log('[APP] Demande de connexion reçue:', event.detail);
-      pendingRequest.value = event.detail;
+    // Écouter les erreurs de streaming (diagnostic) via l'API d'événements typés Tauri
+    streamingErrorUnlisten = await listen<string>('ghosthand-streaming-error', (event) => {
+      console.error('[APP]', event.payload);
+    });
+
+    // Écouter les demandes de connexion via l'API d'événements typés Tauri (pas d'eval)
+    connectRequestUnlisten = await listen<ConnectionRequest>('ghosthand-connect-request', (event) => {
+      console.log('[APP] Demande de connexion reçue:', event.payload);
+      pendingRequest.value = event.payload;
       connectionRequestVisible.value = true;
-    }) as EventListener);
+    });
     console.log('[APP] Listener connexion enregistré');
 
   } catch (error) {

@@ -5,7 +5,7 @@ mod storage_commands;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{Manager, State, AppHandle};
+use tauri::{Emitter, Manager, State, AppHandle};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tokio::sync::Mutex;
@@ -682,12 +682,11 @@ async fn start_streaming(
             diag_log(&format!("start_streaming: data_channel test = {:?}", dc_test.is_ok()));
             if let Err(ref e) = dc_test {
                 diag_log(&format!("start_streaming: data_channel ERREUR: {}", e));
-                // Notifier l'UI (message sérialisé via serde_json pour éviter injection JS)
-                if let Some(w) = app_handle.get_webview_window("main") {
-                    if let Ok(msg) = serde_json::to_string(&format!("STREAMING: Data channel non prêt: {}", e)) {
-                        let _ = w.eval(format!("alert({});", msg));
-                    }
-                }
+                // Notifier l'UI via l'API d'événements typés Tauri (pas d'eval/injection JS possible)
+                let _ = app_handle.emit(
+                    "ghosthand-streaming-error",
+                    format!("STREAMING: Data channel non prêt: {}", e),
+                );
             }
 
             // --- E2E Key Exchange (X25519 ECDH) ---
@@ -789,11 +788,15 @@ async fn start_streaming(
             if let Some(pw) = preview_window {
                 streamer = streamer.with_local_callback(move |data, width, height, timestamp| {
                     let b64_data = base64::engine::general_purpose::STANDARD.encode(&data);
-                    let js_code = format!(
-                        "window.dispatchEvent(new CustomEvent('ghosthand-local-preview', {{ detail: {{ data: '{}', width: {}, height: {}, timestamp: {} }} }}));",
-                        b64_data, width, height, timestamp
+                    let _ = pw.emit(
+                        "ghosthand-local-preview",
+                        serde_json::json!({
+                            "data": b64_data,
+                            "width": width,
+                            "height": height,
+                            "timestamp": timestamp,
+                        }),
                     );
-                    let _ = pw.eval(&js_code);
                 });
             }
 
@@ -885,15 +888,19 @@ async fn start_receiving(
                         diag_log(&format!("RECEIVER: Frame #{} reçue: {}x{} ({} bytes)", count, width, height, data.len()));
                     }
                     if count == 0 {
-                        let _ = window.eval("document.title = 'FRAME REÇUE!';");
+                        let _ = window.set_title("FRAME REÇUE!");
                     }
                     let b64_data = base64::engine::general_purpose::STANDARD.encode(&data);
-                    let js_code = format!(
-                        "window.dispatchEvent(new CustomEvent('ghosthand-video-frame', {{ detail: {{ data: '{}', width: {}, height: {}, timestamp: {} }} }}));",
-                        b64_data, width, height, timestamp
-                    );
-                    if let Err(e) = window.eval(&js_code) {
-                        diag_log(&format!("RECEIVER: eval erreur: {}", e));
+                    if let Err(e) = window.emit(
+                        "ghosthand-video-frame",
+                        serde_json::json!({
+                            "data": b64_data,
+                            "width": width,
+                            "height": height,
+                            "timestamp": timestamp,
+                        }),
+                    ) {
+                        diag_log(&format!("RECEIVER: emit erreur: {}", e));
                     }
                 },
                 move |msg| {
@@ -927,33 +934,21 @@ async fn start_receiving(
                             if let Some(ref w) = msg_window {
                                 match &other {
                                     ControlMessage::DisplayListResponse { displays } => {
-                                        if let Ok(json) = serde_json::to_string(displays) {
-                                            let js = format!(
-                                                "window.dispatchEvent(new CustomEvent('ghosthand-display-list', {{ detail: {} }}));",
-                                                json
-                                            );
-                                            let _ = w.eval(&js);
-                                        }
+                                        let _ = w.emit("ghosthand-display-list", displays);
                                     }
                                     ControlMessage::ChatMessage { from, text, timestamp } => {
-                                        if let Ok(detail) = serde_json::to_string(&serde_json::json!({
-                                            "from": from, "text": text, "timestamp": timestamp
-                                        })) {
-                                            let js = format!(
-                                                "window.dispatchEvent(new CustomEvent('ghosthand-chat-message', {{ detail: {} }}));",
-                                                detail
-                                            );
-                                            let _ = w.eval(&js);
-                                        }
+                                        let _ = w.emit(
+                                            "ghosthand-chat-message",
+                                            serde_json::json!({
+                                                "from": from, "text": text, "timestamp": timestamp
+                                            }),
+                                        );
                                     }
                                     ControlMessage::ClipboardSync { content } => {
-                                        if let Ok(detail) = serde_json::to_string(&serde_json::json!({ "content": content })) {
-                                            let js = format!(
-                                                "window.dispatchEvent(new CustomEvent('ghosthand-clipboard-sync', {{ detail: {} }}));",
-                                                detail
-                                            );
-                                            let _ = w.eval(&js);
-                                        }
+                                        let _ = w.emit(
+                                            "ghosthand-clipboard-sync",
+                                            serde_json::json!({ "content": content }),
+                                        );
                                     }
                                     _ => println!("[RECEIVER] Message non géré: {:?}", other),
                                 }
@@ -1215,17 +1210,12 @@ async fn start_listening_for_requests(
                             requests_guard.push(request.clone());
                             drop(requests_guard); // Libérer explicitement le lock
 
-                            // Envoyer les données à l'UI via window.eval() + DOM CustomEvent
-                            if let Ok(detail) = serde_json::to_string(&serde_json::json!({
-                                "from": from, "timestamp": now
-                            })) {
-                                let js_code = format!(
-                                    "window.dispatchEvent(new CustomEvent('ghosthand-connect-request', {{ detail: {} }}));",
-                                    detail
-                                );
-                                if let Err(e) = window.eval(&js_code) {
-                                    eprintln!("[LISTENER] Erreur envoi event UI: {}", e);
-                                }
+                            // Envoyer les données à l'UI via l'API d'événements typés Tauri
+                            if let Err(e) = window.emit(
+                                "ghosthand-connect-request",
+                                serde_json::json!({ "from": from, "timestamp": now }),
+                            ) {
+                                eprintln!("[LISTENER] Erreur envoi event UI: {}", e);
                             }
                         }
                     }
