@@ -6,7 +6,7 @@ set -e
 REPO="git@github.com:heiphaistos44-crypto/GhostHandDesk.git"
 DEPLOY_DIR="/opt/ghosthanddesk"
 PM2_NAME="ghosthanddesk"
-PORT=3010
+PORT=9000
 DOMAIN="ghd.heiphaistos.org"
 
 echo "[INFO] === Déploiement GhostHandDesk sur $DOMAIN ==="
@@ -39,12 +39,8 @@ if pm2 describe "$PM2_NAME" &>/dev/null; then
     echo "[INFO] PM2 : redémarrage de $PM2_NAME..."
     pm2 restart "$PM2_NAME"
 else
-    echo "[INFO] PM2 : démarrage de $PM2_NAME sur port $PORT..."
-    DISABLE_ORIGIN_CHECK=true \
-    PORT=$PORT \
-        pm2 start "$DEPLOY_DIR/server/signaling-server" \
-            --name "$PM2_NAME" \
-            --log "/var/log/pm2/$PM2_NAME.log"
+    echo "[INFO] PM2 : démarrage de $PM2_NAME via ecosystem..."
+    pm2 start "$DEPLOY_DIR/ecosystem.config.js"
 fi
 pm2 save
 
