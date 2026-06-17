@@ -1,6 +1,6 @@
 [package]
 name = "ghosthanddesk-tauri"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 
 [build-dependencies]
@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 base64 = "0.22"
 xcap = "0.0.13"
+sysinfo = { version = "0.31", features = [] }
 
 # Modules du client principal
 [dependencies.ghost_hand_client]

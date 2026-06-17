@@ -206,9 +206,15 @@ let lastFrameTime = 0; // Pour mesure latence inter-frame
 let totalBytesReceived = 0;
 let frameSizes: number[] = [];
 
+// Sync état fullscreen quand l'utilisateur presse Echap
+function onFullscreenChange() {
+  isFullscreen.value = !!document.fullscreenElement;
+}
+
 // Lifecycle
 onMounted(async () => {
   console.log('RemoteViewer monté, connexion:', props.connectionId);
+  document.addEventListener('fullscreenchange', onFullscreenChange);
 
   // Focus sur le canvas pour les événements clavier
   canvasRef.value?.focus();
@@ -269,24 +275,13 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (videoUnlisten) {
-    videoUnlisten();
-  }
-  if (chatUnlisten) {
-    chatUnlisten();
-  }
-  if (clipboardUnlisten) {
-    clipboardUnlisten();
-  }
-  if (displayListUnlisten) {
-    displayListUnlisten();
-  }
-  if (fpsIntervalId) {
-    clearInterval(fpsIntervalId);
-  }
-  if (resizeObserver) {
-    resizeObserver.disconnect();
-  }
+  document.removeEventListener('fullscreenchange', onFullscreenChange);
+  if (videoUnlisten) videoUnlisten();
+  if (chatUnlisten) chatUnlisten();
+  if (clipboardUnlisten) clipboardUnlisten();
+  if (displayListUnlisten) displayListUnlisten();
+  if (fpsIntervalId) clearInterval(fpsIntervalId);
+  if (resizeObserver) resizeObserver.disconnect();
 });
 
 // Types
@@ -705,6 +700,7 @@ function updateSourceResolution() {
   flex-direction: column;
   height: 100%;
   background: #000;
+  position: relative;
 }
 
 /* Toolbar */
@@ -792,7 +788,7 @@ function updateSourceResolution() {
 /* Quality Dropdown */
 .quality-dropdown {
   position: absolute;
-  top: 60px;
+  top: 58px;
   right: 20px;
   width: 320px;
   background: #252526;

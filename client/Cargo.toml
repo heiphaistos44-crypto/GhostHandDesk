@@ -1,6 +1,6 @@
 [package]
 name = "ghost_hand_client"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["GhostHandDesk Contributors"]
 description = "Open-source remote desktop client"

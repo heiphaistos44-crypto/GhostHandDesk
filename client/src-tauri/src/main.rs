@@ -23,6 +23,7 @@ use ghost_hand_client::screen_capture::{self, ScreenCapturer};
 use ghost_hand_client::video_encoder::{self, VideoEncoder};
 use base64::Engine;
 use std::os::windows::process::CommandExt;
+use sysinfo::{System, Disks, CpuRefreshKind, MemoryRefreshKind, RefreshKind};
 // Fonction de diagnostic - écrit dans un fichier log
 fn diag_log(msg: &str) {
     use std::io::Write;
@@ -204,6 +205,8 @@ struct AppState {
     active_encoder: Arc<Mutex<Option<Arc<Mutex<Box<dyn VideoEncoder>>>>>>,
     /// Clé de session E2E partagée (dérivée via X25519 ECDH lors du handshake)
     e2e_session_key: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Handle sysinfo — maintenu entre les appels pour delta CPU correct
+    sys_handle: Arc<std::sync::Mutex<System>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1417,6 +1420,42 @@ async fn send_file(
     }
 }
 
+/// Statistiques système temps-réel (CPU, RAM, Disque, Uptime)
+#[tauri::command]
+fn get_system_stats(state: State<AppState>) -> Result<serde_json::Value, String> {
+    let mut sys = state.sys_handle.lock().map_err(|e| e.to_string())?;
+
+    sys.refresh_cpu_usage();
+    sys.refresh_memory();
+
+    let cpu_usage = sys.global_cpu_usage();
+    let ram_used = sys.used_memory();   // octets
+    let ram_total = sys.total_memory(); // octets
+
+    // Disque : on prend C:\ en priorité, sinon le premier
+    let disks = Disks::new_with_refreshed_list();
+    let (disk_used, disk_total) = disks.list()
+        .iter()
+        .find(|d| {
+            let mp = d.mount_point().to_str().unwrap_or("");
+            mp == "C:\\" || mp == "C:/"
+        })
+        .or_else(|| disks.list().first())
+        .map(|d| (d.total_space().saturating_sub(d.available_space()), d.total_space()))
+        .unwrap_or((0, 0));
+
+    let uptime_secs = System::uptime();
+
+    Ok(serde_json::json!({
+        "cpu_usage": (cpu_usage * 10.0).round() / 10.0,
+        "ram_used": ram_used,
+        "ram_total": ram_total,
+        "disk_used": disk_used,
+        "disk_total": disk_total,
+        "uptime_secs": uptime_secs,
+    }))
+}
+
 fn main() {
     diag_log("=== APPLICATION DÉMARRÉE ===");
 
@@ -1522,6 +1561,12 @@ fn main() {
     start_lan_discovery(device_id.clone(), server_port, discovered_peers.clone());
 
     // Créer l'état global
+    let sys_init = System::new_with_specifics(
+        RefreshKind::new()
+            .with_cpu(CpuRefreshKind::everything())
+            .with_memory(MemoryRefreshKind::everything()),
+    );
+
     let app_state = AppState {
         device_id: device_id.clone(),
         data_dir: data_dir.clone(),
@@ -1535,6 +1580,7 @@ fn main() {
         active_capturer: Arc::new(Mutex::new(None)),
         active_encoder: Arc::new(Mutex::new(None)),
         e2e_session_key: Arc::new(Mutex::new(None)),
+        sys_handle: Arc::new(std::sync::Mutex::new(sys_init)),
     };
 
     // Cloner pour les closures
@@ -1587,6 +1633,8 @@ fn main() {
             get_favorite_peers,
             set_peer_favorite,
             get_storage_stats,
+            // Système
+            get_system_stats,
         ])
         .setup(move |app| {
             // Récupérer la fenêtre principale
