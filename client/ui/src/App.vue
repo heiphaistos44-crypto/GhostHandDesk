@@ -413,7 +413,8 @@ async function handleConnect(targetId: string, password: string | null) {
       console.error('Erreur démarrage réception:', error);
     }
   } catch (error: any) {
-    connectionError.value = error.message || 'Échec de la connexion';
+    // Tauri retourne une String (pas un Error object) → error.message est undefined
+    connectionError.value = typeof error === 'string' ? error : (error?.message || String(error) || 'Échec de la connexion');
     connected.value = false;
   } finally {
     connecting.value = false;
@@ -444,7 +445,7 @@ async function handleAcceptRequest() {
       console.error('Erreur streaming/input:', error);
     }
   } catch (error: any) {
-    connectionError.value = error.message || 'Échec de l\'acceptation';
+    connectionError.value = typeof error === 'string' ? error : (error?.message || String(error) || 'Échec de l\'acceptation');
   }
 }
 

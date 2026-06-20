@@ -1,6 +1,6 @@
 {
   "name": "ghosthanddesk-client-wrapper",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Wrapper package for Tauri",
   "scripts": {

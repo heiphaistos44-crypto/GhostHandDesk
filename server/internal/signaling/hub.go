@@ -487,6 +487,20 @@ func (c *Client) handleConnectRequest(msg *models.Message) {
 	}
 	log.Printf("[CLIENT %s] Demande de connexion vers %s (password: %s)", c.ID, req.TargetID, passwordMasked)
 
+	// Rejeter l'auto-connexion
+	if req.TargetID == c.ID {
+		response := models.Message{
+			Type: models.TypeError,
+			Data: models.ErrorMessage{Code: 400, Message: "Impossible de se connecter à soi-même (même Device ID)"},
+		}
+		responseData, _ := json.Marshal(response)
+		select {
+		case c.Send <- responseData:
+		default:
+		}
+		return
+	}
+
 	// Vérifier si le client cible existe
 	c.Hub.mu.RLock()
 	_, exists := c.Hub.clients[req.TargetID]
@@ -498,7 +512,7 @@ func (c *Client) handleConnectRequest(msg *models.Message) {
 			Type: models.TypeError,
 			Data: models.ErrorMessage{
 				Code:    404,
-				Message: "Client cible non trouvé",
+				Message: "Appareil cible introuvable — vérifiez que l'autre PC est connecté au même serveur VPS",
 			},
 		}
 		responseData, err := json.Marshal(response)
