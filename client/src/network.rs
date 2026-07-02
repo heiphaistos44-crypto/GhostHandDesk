@@ -775,6 +775,10 @@ pub struct SessionManager {
     pub webrtc: Option<Transport>,
     // Buffer pour les demandes de connexion reçues
     pending_offers: Arc<Mutex<Vec<(String, String)>>>, // Vec<(from, offer_sdp)>
+    /// Secret d'authentification partagé (raw hash PBKDF2 du mot de passe), établi
+    /// lors du challenge-response. Sert à lier l'échange de clés E2E au mot de passe
+    /// (protection anti-MITM). `None` si aucune authentification par mot de passe.
+    auth_secret: Option<Vec<u8>>,
 }
 
 impl SessionManager {
@@ -785,7 +789,13 @@ impl SessionManager {
             signaling: None,
             webrtc: None,
             pending_offers: Arc::new(Mutex::new(Vec::new())),
+            auth_secret: None,
         }
+    }
+
+    /// Secret d'authentification partagé établi lors du dernier handshake (si mot de passe).
+    pub fn auth_secret(&self) -> Option<Vec<u8>> {
+        self.auth_secret.clone()
     }
 
     /// Récupérer les demandes en attente
@@ -863,6 +873,9 @@ impl SessionManager {
         let timeout = tokio::time::sleep(Duration::from_secs(CONNECTION_TIMEOUT_SECS));
         tokio::pin!(timeout);
 
+        // Secret d'authentification dérivé si un challenge mot de passe est résolu
+        let mut established_auth: Option<Vec<u8>> = None;
+
         loop {
             tokio::select! {
                 msg_result = async {
@@ -890,6 +903,10 @@ impl SessionManager {
                                 })?;
 
                                 let response = crate::crypto::compute_challenge_response(pwd, &salt, &challenge);
+
+                                // Lier l'échange de clés E2E au mot de passe : le viewer dérive
+                                // le même secret d'authentification que l'hôte (raw hash PBKDF2).
+                                established_auth = Some(crate::crypto::derive_raw_hash(pwd, &salt));
 
                                 self.signaling.as_ref().ok_or_else(|| {
                                     GhostHandError::Network("Signaling disconnected".into())
@@ -944,6 +961,9 @@ impl SessionManager {
                 }
             }
         }
+
+        // Mémoriser le secret d'authentification pour la dérivation de la clé E2E
+        self.auth_secret = established_auth;
 
         // 2. Créer le transport relay via VPS (élimine les problèmes NAT traversal WebRTC)
         let signaling = self.signaling.as_ref().ok_or_else(|| {
@@ -1141,6 +1161,9 @@ impl SessionManager {
     pub async fn accept_connection(&mut self, from: String) -> Result<()> {
         info!("Acceptation de la connexion de {}", from);
 
+        // Secret d'authentification établi si un mot de passe est vérifié
+        let mut established_auth: Option<Vec<u8>> = None;
+
         // Vérification de password si configuré
         if let Some(ref password_hash) = self.config.security_config.password_hash {
             info!("Password configuré, envoi du challenge...");
@@ -1215,7 +1238,13 @@ impl SessionManager {
             }
 
             info!("Password vérifié avec succès pour {}", from);
+
+            // Lier l'échange de clés E2E au mot de passe (même secret que le viewer)
+            established_auth = Some(crate::crypto::extract_raw_hash_from_stored(password_hash)?);
         }
+
+        // Mémoriser le secret d'authentification pour la dérivation de la clé E2E
+        self.auth_secret = established_auth;
 
         // 1. Envoyer l'acceptation
         self.signaling.as_ref().ok_or_else(|| {
@@ -1267,18 +1296,28 @@ impl SessionManager {
     }
 }
 
-/// Generate a random device ID with timestamp + random component
+/// Generate a random device ID with 128 bits of entropy from the OS CSPRNG.
+///
+/// SÉCURITÉ : 128 bits via `ring::SystemRandom` (collision ~2⁻¹²⁸). Ne PAS
+/// revenir à un ID basé sur le timestamp — il serait devinable et permettrait
+/// l'usurpation d'identité de pair (régression corrigée v0.5.3).
 pub fn generate_device_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use rand::Rng;
+    use ring::rand::{SecureRandom, SystemRandom};
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    if rng.fill(&mut bytes).is_err() {
+        // Repli extrêmement improbable : nanosecondes (ne devrait jamais arriver)
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        return format!("GHD-{:032x}", ts);
+    }
 
-    let random_part: u32 = rand::thread_rng().gen();
-    format!("GHD-{:x}-{:x}", timestamp, random_part)
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("GHD-{}", hex)
 }
 
 #[cfg(test)]

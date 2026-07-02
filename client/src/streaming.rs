@@ -3,7 +3,7 @@
 //! Ce module gère la boucle de capture, encodage et transmission vidéo.
 
 use crate::adaptive_bitrate::AdaptiveBitrateController;
-use crate::crypto::{CryptoManager, EncryptedData};
+use crate::crypto::{open_frame, seal_frame, ENCRYPTED_MAGIC};
 use crate::error::{GhostHandError, Result};
 use crate::input_control::{InputController, MouseButton, MouseEvent as InputMouseEvent, KeyboardEvent as InputKeyboardEvent, KeyModifiers};
 use crate::network::Transport;
@@ -16,8 +16,18 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
-/// Magic byte indiquant un paquet chiffré AES-256-GCM (au-dessus de DTLS)
-const ENCRYPTED_MAGIC: u8 = 0xE2;
+/// Poignée partagée vers la clé de session E2E. Mise à jour en direct dès que le
+/// handshake X25519 se termine — le streamer/récepteur la relisent à chaque trame.
+/// Peut contenir un sentinel `b"PENDING:..."` tant que la clé n'est pas dérivée.
+pub type SessionKeyHandle = Arc<Mutex<Option<Vec<u8>>>>;
+
+/// Extraire la vraie clé de session (ignore le sentinel PENDING de handshake).
+fn real_session_key(guard: &Option<Vec<u8>>) -> Option<Vec<u8>> {
+    guard
+        .as_ref()
+        .filter(|k| !k.starts_with(b"PENDING:"))
+        .cloned()
+}
 
 fn stream_diag(msg: &str) {
     tracing::debug!("[STREAM] {}", msg);
@@ -35,8 +45,8 @@ pub struct Streamer {
     running: Arc<AtomicBool>,
     adaptive_controller: Option<Arc<Mutex<AdaptiveBitrateController>>>,
     local_frame_callback: Option<LocalFrameCallback>,
-    /// Clé de session E2E partagée (None = pas de chiffrement applicatif, DTLS-SRTP actif)
-    session_key: Option<Arc<Vec<u8>>>,
+    /// Poignée vers la clé de session E2E (lue en direct à chaque trame).
+    key_handle: Option<SessionKeyHandle>,
 }
 
 impl Streamer {
@@ -55,13 +65,13 @@ impl Streamer {
             running: Arc::new(AtomicBool::new(false)),
             adaptive_controller: None,
             local_frame_callback: None,
-            session_key: None,
+            key_handle: None,
         }
     }
 
-    /// Activer le chiffrement E2E avec la clé de session dérivée (X25519 ECDH)
-    pub fn with_session_key(mut self, key: Vec<u8>) -> Self {
-        self.session_key = Some(Arc::new(key));
+    /// Fournir la poignée de clé de session E2E (chiffrement obligatoire du flux).
+    pub fn with_session_key_handle(mut self, handle: SessionKeyHandle) -> Self {
+        self.key_handle = Some(handle);
         self
     }
 
@@ -93,7 +103,6 @@ impl Streamer {
     /// Démarrer le streaming
     pub async fn start(&self) -> Result<()> {
         info!("Démarrage du streaming vidéo à {} FPS", self.framerate);
-        warn!("E2E encryption au niveau applicatif non intégré dans le pipeline vidéo - DTLS-SRTP actif par défaut");
 
         self.running.store(true, Ordering::SeqCst);
 
@@ -107,30 +116,34 @@ impl Streamer {
 
         // Task d'envoi séparée — tourne indépendamment de la boucle de capture
         let webrtc = self.webrtc.clone();
-        let sender_key = self.session_key.clone();
-        let crypto = CryptoManager::new();
+        let key_handle = self.key_handle.clone();
+        let mut warned_no_key = false;
         tokio::spawn(async move {
             while let Some(bytes) = frame_rx.recv().await {
                 let start = std::time::Instant::now();
 
-                // Chiffrer si clé de session disponible
-                let payload = if let Some(ref key) = sender_key {
-                    match crypto.encrypt(key, &bytes) {
-                        Ok(enc) => {
-                            // Format: [0xE2][nonce(12)][ciphertext]
-                            let mut envelope = Vec::with_capacity(1 + enc.nonce.len() + enc.ciphertext.len());
-                            envelope.push(ENCRYPTED_MAGIC);
-                            envelope.extend_from_slice(&enc.nonce);
-                            envelope.extend_from_slice(&enc.ciphertext);
-                            envelope
-                        }
+                // SÉCURITÉ (F1/F3) : le flux écran passe par le relais VPS. On refuse
+                // catégoriquement d'émettre une trame en clair. Tant que la clé de
+                // session E2E n'est pas dérivée, on SKIP la trame (pas de fuite).
+                let real_key = match &key_handle {
+                    Some(h) => real_session_key(&*h.lock().await),
+                    None => None,
+                };
+                let payload = match real_key {
+                    Some(key) => match seal_frame(&key, &bytes) {
+                        Ok(env) => env,
                         Err(e) => {
-                            stream_diag(&format!("SENDER: erreur chiffrement: {}", e));
-                            bytes // Fallback non chiffré
+                            stream_diag(&format!("SENDER: erreur chiffrement, trame ignorée: {}", e));
+                            continue;
                         }
+                    },
+                    None => {
+                        if !warned_no_key {
+                            warn!("Streaming: clé E2E pas encore prête — trames écartées jusqu'au handshake (aucune émission en clair)");
+                            warned_no_key = true;
+                        }
+                        continue;
                     }
-                } else {
-                    bytes
                 };
 
                 let webrtc_guard = webrtc.lock().await;
@@ -256,8 +269,8 @@ impl Streamer {
 /// Receiver : réception et décodage vidéo
 pub struct Receiver {
     webrtc: Arc<Mutex<Transport>>,
-    /// Clé de session E2E pour déchiffrement (synchronisée avec Streamer distant)
-    session_key: Option<Arc<Vec<u8>>>,
+    /// Poignée vers la clé de session E2E (lue en direct, synchronisée avec le Streamer distant)
+    key_handle: Option<SessionKeyHandle>,
 }
 
 impl Receiver {
@@ -265,13 +278,13 @@ impl Receiver {
     pub fn new(webrtc: Transport) -> Self {
         Self {
             webrtc: Arc::new(Mutex::new(webrtc)),
-            session_key: None,
+            key_handle: None,
         }
     }
 
-    /// Activer le déchiffrement E2E avec la clé de session
-    pub fn with_session_key(mut self, key: Vec<u8>) -> Self {
-        self.session_key = Some(Arc::new(key));
+    /// Fournir la poignée de clé de session E2E pour le déchiffrement.
+    pub fn with_session_key_handle(mut self, handle: SessionKeyHandle) -> Self {
+        self.key_handle = Some(handle);
         self
     }
 
@@ -305,72 +318,65 @@ impl Receiver {
 
         let frame_cb = Arc::new(frame_callback);
         let msg_cb = Arc::new(message_callback);
-        let receiver_key = self.session_key.clone();
-        let recv_crypto = CryptoManager::new();
+        let receiver_handle = self.key_handle.clone();
         tokio::spawn(async move {
             let mut reassembly: Option<(usize, Vec<u8>)> = None;
 
             while let Some(raw_data) = rx.recv().await {
-                // Déchiffrer si paquet chiffré (magic byte 0xE2) et clé disponible
-                let data = if raw_data.first() == Some(&ENCRYPTED_MAGIC) {
-                    if let Some(ref key) = receiver_key {
-                        // Format: [0xE2][nonce(12)][ciphertext]
-                        if raw_data.len() >= 13 {
-                            let nonce = raw_data[1..13].to_vec();
-                            let ciphertext = raw_data[13..].to_vec();
-                            let enc = EncryptedData { nonce, ciphertext };
-                            match recv_crypto.decrypt(key, &enc) {
-                                Ok(plain) => plain,
-                                Err(e) => {
-                                    stream_diag(&format!("RECEIVER: erreur déchiffrement: {}", e));
-                                    continue;
-                                }
-                            }
-                        } else {
-                            stream_diag("RECEIVER: paquet chiffré trop court, ignoré");
-                            continue;
-                        }
-                    } else {
-                        // Pas de clé: on essaie de traiter tel quel (rétrocompatibilité)
-                        raw_data
-                    }
-                } else {
-                    raw_data
-                };
-
-                // Vérifier si c'est un message fragmenté
-                if data.len() >= 2 && data[0] == 0xFF {
-                    match data[1] {
-                        0x01 if data.len() >= 6 => {
-                            let total_len = u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize;
+                // 1. Réassembler AVANT de déchiffrer : la fragmentation (0xFF) s'applique
+                //    sur la trame déjà scellée. Un fragment isolé ne peut pas être déchiffré.
+                let frame: Vec<u8> = if raw_data.len() >= 2 && raw_data[0] == 0xFF {
+                    match raw_data[1] {
+                        0x01 if raw_data.len() >= 6 => {
+                            let total_len = u32::from_le_bytes([raw_data[2], raw_data[3], raw_data[4], raw_data[5]]) as usize;
                             reassembly = Some((total_len, Vec::with_capacity(total_len)));
                             continue;
                         }
                         0x02 => {
                             if let Some((expected_len, ref mut buffer)) = reassembly {
-                                buffer.extend_from_slice(&data[2..]);
+                                buffer.extend_from_slice(&raw_data[2..]);
                                 if buffer.len() >= expected_len {
-                                    let complete_data = std::mem::take(buffer);
+                                    let complete = std::mem::take(buffer);
                                     reassembly = None;
-                                    if let Ok(msg) = ControlMessage::from_bytes(&complete_data) {
-                                        match msg {
-                                            ControlMessage::VideoFrame { data, width, height, timestamp, .. } => {
-                                                frame_cb(data, width, height, timestamp);
-                                            }
-                                            other => {
-                                                msg_cb(other);
-                                            }
-                                        }
-                                    }
+                                    complete
+                                } else {
+                                    continue;
                                 }
+                            } else {
+                                continue;
                             }
+                        }
+                        _ => continue,
+                    }
+                } else {
+                    raw_data
+                };
+
+                // 2. Déchiffrer si trame scellée (0xE2). Le flux vidéo est TOUJOURS scellé
+                //    côté émetteur ; les trames en clair ne subsistent que pour le handshake.
+                let real_key = match &receiver_handle {
+                    Some(h) => real_session_key(&*h.lock().await),
+                    None => None,
+                };
+                let data = if frame.first() == Some(&ENCRYPTED_MAGIC) {
+                    match real_key {
+                        Some(ref k) => match open_frame(k, &frame) {
+                            Ok(plain) => plain,
+                            Err(e) => {
+                                stream_diag(&format!("RECEIVER: erreur déchiffrement: {}", e));
+                                continue;
+                            }
+                        },
+                        None => {
+                            stream_diag("RECEIVER: trame chiffrée reçue sans clé, ignorée");
                             continue;
                         }
-                        _ => {}
                     }
-                }
+                } else {
+                    frame
+                };
 
-                // Message normal (non fragmenté)
+                // 3. Parser le message de contrôle
                 if let Ok(msg) = ControlMessage::from_bytes(&data) {
                     match msg {
                         ControlMessage::VideoFrame { data, width, height, timestamp, .. } => {

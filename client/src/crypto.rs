@@ -3,10 +3,18 @@ use base64::prelude::*;
 use ring::aead::{Aad, BoundKey, Nonce, NonceSequence, SealingKey, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 const NONCE_SIZE: usize = 12;
 const KEY_SIZE: usize = 32;
+
+/// Nombre d'itérations PBKDF2 (recommandation OWASP)
+const PBKDF2_ITERATIONS: u32 = 100_000;
+
+/// Magic byte préfixant une trame chiffrée AES-256-GCM au niveau applicatif.
+/// Format d'une trame scellée : `[0xE2][nonce(12)][ciphertext+tag]`.
+pub const ENCRYPTED_MAGIC: u8 = 0xE2;
 
 /// Cryptography manager for E2E encryption
 pub struct CryptoManager {
@@ -226,6 +234,106 @@ pub fn generate_challenge() -> crate::error::Result<Vec<u8>> {
     Ok(challenge)
 }
 
+/// Dériver le hash brut d'un mot de passe (PBKDF2-SHA256) — identique à ce que
+/// l'hôte stocke dans `password_hash` (partie après le sel).
+pub fn derive_raw_hash(password: &str, salt: &[u8]) -> Vec<u8> {
+    let mut raw = [0u8; 32];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(PBKDF2_ITERATIONS).expect("PBKDF2_ITERATIONS != 0"),
+        salt,
+        password.as_bytes(),
+        &mut raw,
+    );
+    raw.to_vec()
+}
+
+/// Extraire le hash brut (32 bytes) d'un `password_hash` stocké = base64(salt ‖ raw_hash).
+pub fn extract_raw_hash_from_stored(stored_password_hash: &str) -> Result<Vec<u8>> {
+    let combined = BASE64_STANDARD
+        .decode(stored_password_hash)
+        .map_err(|e| GhostHandError::Crypto(format!("Invalid stored hash: {}", e)))?;
+    if combined.len() < NONCE_SIZE + 32 {
+        return Err(GhostHandError::Crypto("Stored hash too short".to_string()));
+    }
+    Ok(combined[NONCE_SIZE..NONCE_SIZE + 32].to_vec())
+}
+
+/// Dériver la clé de session E2E finale via HKDF-SHA256.
+///
+/// Sécurité : lie le secret ECDH (X25519) au secret d'authentification dérivé du
+/// mot de passe (`auth_secret`). Un attaquant qui MITM l'échange de clés (ex. le
+/// relais VPS) ne connaît pas `auth_secret` et ne peut donc pas dériver la clé —
+/// ce qui neutralise l'attaque MITM sur l'ECDH quand un mot de passe est défini.
+///
+/// Sans mot de passe (`auth_secret == None`), la clé ne dépend que de l'ECDH :
+/// le trafic est chiffré (écoute passive impossible) mais l'échange reste
+/// non authentifié (MITM actif théoriquement possible — comparer une empreinte
+/// de session hors-bande pour s'en prémunir).
+pub fn derive_session_key(ecdh_shared: &[u8], auth_secret: Option<&[u8]>) -> Result<Vec<u8>> {
+    use ring::hkdf;
+
+    let salt_bytes: &[u8] = match auth_secret {
+        Some(s) if !s.is_empty() => s,
+        _ => b"ghd-e2e-no-auth-salt-v1",
+    };
+
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, salt_bytes);
+    let prk = salt.extract(ecdh_shared);
+    let info: &[&[u8]] = &[b"ghd-e2e-session-key-v1"];
+    let okm = prk
+        .expand(info, hkdf::HKDF_SHA256)
+        .map_err(|_| GhostHandError::Crypto("HKDF expand failed".to_string()))?;
+
+    let mut key = [0u8; KEY_SIZE];
+    okm.fill(&mut key)
+        .map_err(|_| GhostHandError::Crypto("HKDF fill failed".to_string()))?;
+    Ok(key.to_vec())
+}
+
+/// Empreinte de session lisible (SAS — Short Authentication String) dérivée de la
+/// clé E2E. Elle est **identique des deux côtés** en l'absence de MITM et
+/// **différente** si un attaquant s'est intercalé dans l'échange de clés (il
+/// négocie alors deux clés distinctes). Les utilisateurs comparent cette chaîne
+/// hors-bande (voix, etc.) pour authentifier la session — utile notamment quand
+/// aucun mot de passe n'est défini. 64 bits → grinding hors ligne infaisable.
+pub fn session_fingerprint(session_key: &[u8]) -> String {
+    use ring::digest;
+    let mut ctx = digest::Context::new(&digest::SHA256);
+    ctx.update(b"ghd-session-fingerprint-v1");
+    ctx.update(session_key);
+    let d = ctx.finish();
+    let b = d.as_ref();
+    format!(
+        "{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+    )
+}
+
+/// Sceller une trame applicative : `[0xE2][nonce(12)][ciphertext+tag]`.
+pub fn seal_frame(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let crypto = CryptoManager::new();
+    let enc = crypto.encrypt(key, plaintext)?;
+    let mut out = Vec::with_capacity(1 + enc.nonce.len() + enc.ciphertext.len());
+    out.push(ENCRYPTED_MAGIC);
+    out.extend_from_slice(&enc.nonce);
+    out.extend_from_slice(&enc.ciphertext);
+    Ok(out)
+}
+
+/// Ouvrir une trame scellée. Échoue si le magic byte est absent ou la trame trop courte.
+pub fn open_frame(key: &[u8], framed: &[u8]) -> Result<Vec<u8>> {
+    if framed.first() != Some(&ENCRYPTED_MAGIC) || framed.len() < 1 + NONCE_SIZE {
+        return Err(GhostHandError::Crypto(
+            "Trame non chiffrée ou trop courte".to_string(),
+        ));
+    }
+    let nonce = framed[1..1 + NONCE_SIZE].to_vec();
+    let ciphertext = framed[1 + NONCE_SIZE..].to_vec();
+    let crypto = CryptoManager::new();
+    crypto.decrypt(key, &EncryptedData { nonce, ciphertext })
+}
+
 /// Encrypted data container
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedData {
@@ -435,6 +543,67 @@ mod tests {
         let wrong_response = compute_challenge_response("wrong_password", &salt, &challenge);
         assert!(!verify_challenge_response(&stored_hash, &challenge, &wrong_response)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_seal_open_frame_roundtrip() -> Result<()> {
+        let crypto = CryptoManager::new();
+        let key = crypto.generate_key()?;
+        let plaintext = b"payload de controle sensible";
+
+        let sealed = seal_frame(&key, plaintext)?;
+        assert_eq!(sealed[0], ENCRYPTED_MAGIC);
+        assert_ne!(&sealed[1..], plaintext); // effectivement chiffré
+
+        let opened = open_frame(&key, &sealed)?;
+        assert_eq!(opened.as_slice(), plaintext);
+
+        // Une trame en clair (sans magic) doit être rejetée
+        assert!(open_frame(&key, plaintext).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_session_fingerprint() -> Result<()> {
+        let crypto = CryptoManager::new();
+        let key = crypto.generate_key()?;
+
+        // Déterministe : même clé → même empreinte
+        assert_eq!(session_fingerprint(&key), session_fingerprint(&key));
+        // Format XXXX-XXXX-XXXX-XXXX (19 caractères)
+        assert_eq!(session_fingerprint(&key).len(), 19);
+
+        // Clé différente → empreinte différente (détection MITM)
+        let key2 = crypto.generate_key()?;
+        assert_ne!(session_fingerprint(&key), session_fingerprint(&key2));
+        Ok(())
+    }
+
+    #[test]
+    fn test_derive_session_key_symmetry_and_binding() -> Result<()> {
+        let kex = KeyExchange::new();
+        let (alice_priv, alice_pub) = kex.generate_keypair()?;
+        let (bob_priv, bob_pub) = kex.generate_keypair()?;
+
+        let alice_shared = kex.derive_shared_secret(&alice_priv, &bob_pub)?;
+        let bob_shared = kex.derive_shared_secret(&bob_priv, &alice_pub)?;
+
+        // Avec le même auth_secret, les deux dérivent la même clé de session
+        let auth = derive_raw_hash("motdepasse", b"sel-partage-1234");
+        let ka = derive_session_key(&alice_shared, Some(&auth))?;
+        let kb = derive_session_key(&bob_shared, Some(&auth))?;
+        assert_eq!(ka, kb);
+        assert_eq!(ka.len(), KEY_SIZE);
+
+        // Un MITM avec le bon ECDH mais SANS auth_secret dérive une clé différente
+        let k_mitm = derive_session_key(&alice_shared, None)?;
+        assert_ne!(ka, k_mitm);
+
+        // Un auth_secret différent → clé différente (liaison au mot de passe)
+        let auth2 = derive_raw_hash("autre", b"sel-partage-1234");
+        let kc = derive_session_key(&alice_shared, Some(&auth2))?;
+        assert_ne!(ka, kc);
         Ok(())
     }
 

@@ -184,8 +184,37 @@ impl InputController {
         Ok(())
     }
 
+    /// Longueur maximale d'un texte injecté via `Type` (anti-abus / DoS)
+    const MAX_TYPE_LEN: usize = 8192;
+
     /// Handle a keyboard event with optional modifiers
     pub fn handle_keyboard_event(&mut self, event: KeyboardEvent, modifiers: KeyModifiers) -> Result<()> {
+        // SÉCURITÉ (F5): `Type` contournait toute la whitelist. On borne la taille et on
+        // rejette les octets nuls / caractères de contrôle non imprimables (hors \r\n\t)
+        // pour empêcher l'injection de séquences de contrôle via un pair malveillant.
+        if let KeyboardEvent::Type { ref text } = event {
+            if text.len() > Self::MAX_TYPE_LEN {
+                warn!("⚠️  SÉCURITÉ: Type rejeté (texte trop long: {} octets)", text.len());
+                return Err(GhostHandError::InputControl(
+                    "Texte injecté trop long".to_string(),
+                ));
+            }
+            if text.chars().any(|c| c.is_control() && c != '\r' && c != '\n' && c != '\t') {
+                warn!("⚠️  SÉCURITÉ: Type rejeté (caractères de contrôle interdits)");
+                audit_log(
+                    AuditLevel::Security,
+                    AuditEvent::SecurityError {
+                        error_code: "BLOCKED_TYPE".to_string(),
+                        description: "Injection de texte avec caractères de contrôle bloquée".to_string(),
+                        peer_id: None,
+                    },
+                );
+                return Err(GhostHandError::InputControl(
+                    "Caractères de contrôle interdits dans le texte injecté".to_string(),
+                ));
+            }
+        }
+
         // SÉCURITÉ: Vérifier la whitelist avant d'exécuter
         if let KeyboardEvent::Press { ref key } | KeyboardEvent::Release { ref key } = event {
             if Self::is_key_blocked(key, &modifiers) {

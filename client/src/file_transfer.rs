@@ -88,13 +88,47 @@ impl FileTransferManager {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("received_file");
-        let file_path = self.download_dir.join(safe_name);
+
+        // Anti-écrasement (F6) : si le fichier existe déjà, suffixer « nom (n).ext »
+        let file_path = Self::unique_path(&self.download_dir, safe_name);
+
         std::fs::write(&file_path, &state.data).map_err(|e| {
             GhostHandError::Internal(format!("Erreur écriture fichier: {}", e))
         })?;
 
         info!("Fichier reçu: {} ({} bytes)", file_path.display(), state.data.len());
         Ok(file_path)
+    }
+
+    /// Construire un chemin de destination non collisionnel : si `nom.ext` existe,
+    /// essayer `nom (1).ext`, `nom (2).ext`, … pour ne jamais écraser un fichier existant.
+    fn unique_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
+        let candidate = dir.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+
+        let path = std::path::Path::new(file_name);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+        let ext = path.extension().and_then(|e| e.to_str());
+
+        for i in 1..=9999 {
+            let name = match ext {
+                Some(e) => format!("{} ({}).{}", stem, i, e),
+                None => format!("{} ({})", stem, i),
+            };
+            let candidate = dir.join(&name);
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+
+        // Repli extrême : suffixe timestamp
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        dir.join(format!("{}-{}", ts, file_name))
     }
 
     /// Préparer un fichier pour l'envoi (retourne les chunks)

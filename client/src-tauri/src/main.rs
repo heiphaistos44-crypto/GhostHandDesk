@@ -13,7 +13,7 @@ use ghost_hand_client::adaptive_bitrate::AdaptiveBitrateController;
 use ghost_hand_client::audit::{audit_log, init_global_logger, AuditEvent, AuditLevel};
 use ghost_hand_client::clipboard::ClipboardManager;
 use ghost_hand_client::config::{Config, VideoCodec};
-use ghost_hand_client::crypto::{KeyExchange, CryptoManager};
+use ghost_hand_client::crypto::{KeyExchange, CryptoManager, derive_session_key, seal_frame, open_frame, session_fingerprint, ENCRYPTED_MAGIC};
 use ghost_hand_client::file_transfer::FileTransferManager;
 use ghost_hand_client::network::{generate_device_id, SessionManager};
 use tokio::sync::mpsc as relay_mpsc;
@@ -225,12 +225,34 @@ struct AppState {
     file_transfer_manager: Arc<Mutex<FileTransferManager>>,
     active_capturer: Arc<Mutex<Option<Arc<Mutex<Box<dyn ScreenCapturer>>>>>>,
     active_encoder: Arc<Mutex<Option<Arc<Mutex<Box<dyn VideoEncoder>>>>>>,
-    /// Clé de session E2E partagée (dérivée via X25519 ECDH lors du handshake)
+    /// Clé de session E2E partagée (dérivée via X25519 ECDH lors du handshake).
+    /// Contient temporairement `b"PENDING:"+priv` pendant le handshake.
     e2e_session_key: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Secret d'authentification partagé (raw hash du mot de passe) issu du
+    /// challenge-response — lie l'ECDH au mot de passe (anti-MITM). None si pas de mdp.
+    e2e_auth_secret: Arc<Mutex<Option<Vec<u8>>>>,
     /// Handle sysinfo — maintenu entre les appels pour delta CPU correct
     sys_handle: Arc<std::sync::Mutex<System>>,
     /// Canal entrant du transport relay (None si WebRTC ou déconnecté)
     relay_data_tx: Arc<Mutex<Option<relay_mpsc::UnboundedSender<Vec<u8>>>>>,
+}
+
+/// Extraire la vraie clé de session depuis le state (ignore le sentinel PENDING).
+async fn real_e2e_key(e2e_key: &Arc<Mutex<Option<Vec<u8>>>>) -> Option<Vec<u8>> {
+    let g = e2e_key.lock().await;
+    g.as_ref()
+        .filter(|k| !k.starts_with(b"PENDING:"))
+        .cloned()
+}
+
+/// Sceller un message de contrôle avec la clé de session E2E si disponible.
+/// Tant que le handshake n'est pas terminé, renvoie le message tel quel (fenêtre
+/// limitée aux tout premiers échanges avant dérivation de la clé).
+async fn seal_control(e2e_key: &Arc<Mutex<Option<Vec<u8>>>>, bytes: Vec<u8>) -> Vec<u8> {
+    match real_e2e_key(e2e_key).await {
+        Some(k) => seal_frame(&k, &bytes).unwrap_or(bytes),
+        None => bytes,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,6 +509,9 @@ async fn connect_to_device(
     match session.connect_to_device(target_id.clone(), password).await {
         Ok(_) => {
             diag_log(&format!("connect_to_device: relay VPS établi avec {}", target_id));
+            // Handshake E2E neuf : réinitialiser la clé, mémoriser le secret d'auth (anti-MITM)
+            *state.e2e_session_key.lock().await = None;
+            *state.e2e_auth_secret.lock().await = session.auth_secret();
             // Enregistrer le canal relay pour le listener de messages entrants
             if let Some(transport) = &session.webrtc {
                 if let Some(tx) = transport.relay_incoming_tx() {
@@ -555,6 +580,10 @@ async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     // Fermer le canal relay avant de détruire la session
     *state.relay_data_tx.lock().await = None;
 
+    // Purger l'état E2E (clé de session + secret d'auth) pour le prochain handshake
+    *state.e2e_session_key.lock().await = None;
+    *state.e2e_auth_secret.lock().await = None;
+
     // Supprimer la session
     *state.session_manager.lock().await = None;
 
@@ -577,25 +606,29 @@ async fn send_mouse_event(
                 "move" => {
                     let msg = ControlMessage::MouseMove { x: event.x, y: event.y };
                     let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-                    webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+                    let payload = seal_control(&state.e2e_session_key, bytes).await;
+                    webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
                 },
                 "down" | "up" => {
                     // FIX: Envoyer MouseMove AVANT MouseClick pour positionner le curseur
                     let move_msg = ControlMessage::MouseMove { x: event.x, y: event.y };
                     let move_bytes = move_msg.to_bytes().map_err(|e| format!("Erreur sérialisation move: {}", e))?;
-                    webrtc.send_data(&move_bytes).await.map_err(|e| format!("Erreur envoi move: {}", e))?;
+                    let move_payload = seal_control(&state.e2e_session_key, move_bytes).await;
+                    webrtc.send_data(&move_payload).await.map_err(|e| format!("Erreur envoi move: {}", e))?;
 
                     let click_msg = ControlMessage::MouseClick {
                         button: event.button.clone(),
                         pressed: event.r#type == "down",
                     };
                     let click_bytes = click_msg.to_bytes().map_err(|e| format!("Erreur sérialisation click: {}", e))?;
-                    webrtc.send_data(&click_bytes).await.map_err(|e| format!("Erreur envoi click: {}", e))?;
+                    let click_payload = seal_control(&state.e2e_session_key, click_bytes).await;
+                    webrtc.send_data(&click_payload).await.map_err(|e| format!("Erreur envoi click: {}", e))?;
                 },
                 "scroll" | "wheel" => {
                     let msg = ControlMessage::MouseScroll { delta: event.delta.clamp(-2000, 2000) };
                     let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-                    webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+                    let payload = seal_control(&state.e2e_session_key, bytes).await;
+                    webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
                 },
                 _ => return Err("Unknown mouse event type".to_string()),
             };
@@ -633,9 +666,10 @@ async fn send_keyboard_event(
                 }),
             };
 
-            // Envoyer via WebRTC
+            // Chiffrer puis envoyer via le transport (relais VPS)
             let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-            webrtc.send_data(&bytes)
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload)
                 .await
                 .map_err(|e| format!("Erreur envoi: {}", e))?;
 
@@ -837,25 +871,17 @@ async fn start_streaming(
             // Récupérer la fenêtre pour le callback local (preview)
             let preview_window = app_handle.get_webview_window("main");
 
-            // Créer streamer avec callback local pour le preview sur le PC contrôlé
-            // La session_key E2E sera disponible si le viewer a déjà répondu à KeyExchangeInit
-            let initial_session_key: Option<Vec<u8>> = {
-                let key_guard = state.e2e_session_key.lock().await;
-                key_guard.as_ref().and_then(|k| {
-                    if k.starts_with(b"PENDING:") { None } else { Some(k.clone()) }
-                })
-            };
-            let mut streamer_builder = Streamer::new(
+            // Créer streamer avec callback local pour le preview sur le PC contrôlé.
+            // La poignée de clé E2E est partagée : le chiffrement s'active en direct dès
+            // que le handshake X25519 se termine (le streamer refuse d'émettre en clair).
+            let mut streamer = Streamer::new(
                 capturer,
                 encoder,
                 webrtc.clone(),
                 30,
-            ).with_adaptive_bitrate(AdaptiveBitrateController::new());
-            if let Some(key) = initial_session_key {
-                diag_log("start_streaming: chiffrement E2E actif dès le début");
-                streamer_builder = streamer_builder.with_session_key(key);
-            }
-            let mut streamer = streamer_builder;
+            )
+            .with_adaptive_bitrate(AdaptiveBitrateController::new())
+            .with_session_key_handle(state.e2e_session_key.clone());
 
             // Stocker le capturer partagé pour le switch de moniteur
             let shared_capturer = streamer.capturer();
@@ -880,7 +906,8 @@ async fn start_streaming(
                     }).collect();
                     let msg = ControlMessage::DisplayListResponse { displays: display_infos };
                     if let Ok(bytes) = msg.to_bytes() {
-                        let _ = webrtc.send_data(&bytes).await;
+                        let payload = seal_control(&state.e2e_session_key, bytes).await;
+                        let _ = webrtc.send_data(&payload).await;
                         diag_log(&format!("start_streaming: display list envoyée ({} écrans)", displays.len()));
                     }
                 }
@@ -958,23 +985,17 @@ async fn start_receiving(
 
             diag_log("start_receiving: fenêtre + webrtc OK");
 
-            // Créer receiver (la clé E2E sera disponible si le contrôleur a déjà envoyé KeyExchangeInit)
-            let initial_rx_key: Option<Vec<u8>> = {
-                let key_guard = state.e2e_session_key.lock().await;
-                key_guard.as_ref().and_then(|k| {
-                    if k.starts_with(b"PENDING:") { None } else { Some(k.clone()) }
-                })
-            };
-            let mut recv_builder = Receiver::new(webrtc.clone());
-            if let Some(key) = initial_rx_key {
-                diag_log("start_receiving: chiffrement E2E actif");
-                recv_builder = recv_builder.with_session_key(key);
-            }
-            let receiver = Arc::new(recv_builder);
+            // Créer receiver avec la poignée de clé E2E partagée (déchiffrement en direct)
+            let receiver = Arc::new(
+                Receiver::new(webrtc.clone())
+                    .with_session_key_handle(state.e2e_session_key.clone()),
+            );
 
             // Référence partagée pour que le callback message puisse gérer KeyExchangeInit
             let webrtc_for_kex = webrtc.clone();
             let e2e_key_for_rx = state.e2e_session_key.clone();
+            let e2e_auth_for_rx = state.e2e_auth_secret.clone();
+            let app_for_kex = app_handle.clone();
 
             // Fenêtre pour les messages non-vidéo (display list, chat, clipboard)
             let msg_window = app_handle.get_webview_window("main");
@@ -1012,17 +1033,34 @@ async fn start_receiving(
                             let kex = KeyExchange::new();
                             let webrtc_kex = webrtc_for_kex.clone();
                             let key_store = e2e_key_for_rx.clone();
+                            let auth_store = e2e_auth_for_rx.clone();
+                            let app_kex = app_for_kex.clone();
                             tauri::async_runtime::spawn(async move {
                                 match kex.generate_keypair() {
                                     Ok((priv_key, pub_key)) => {
                                         match kex.derive_shared_secret(&priv_key, &remote_pub) {
                                             Ok(shared) => {
+                                                // Envoyer d'abord l'accept (en clair), puis activer la clé
                                                 let accept = ControlMessage::KeyExchangeAccept { public_key: pub_key };
                                                 if let Ok(bytes) = accept.to_bytes() {
                                                     let _ = webrtc_kex.send_data(&bytes).await;
                                                 }
-                                                *key_store.lock().await = Some(shared);
-                                                println!("[CRYPTO] Viewer: clé E2E dérivée — AES-256-GCM actif");
+                                                // Lier la clé au mot de passe (anti-MITM du relais)
+                                                let auth = auth_store.lock().await.clone();
+                                                match derive_session_key(&shared, auth.as_deref()) {
+                                                    Ok(session_key) => {
+                                                        let authenticated = auth.is_some();
+                                                        let fingerprint = session_fingerprint(&session_key);
+                                                        *key_store.lock().await = Some(session_key);
+                                                        let mode = if authenticated { "authentifié (mot de passe)" } else { "non authentifié (sans mot de passe)" };
+                                                        println!("[CRYPTO] Viewer: clé E2E dérivée — AES-256-GCM actif — {} — empreinte {}", mode, fingerprint);
+                                                        let _ = app_kex.emit("ghosthand-session-secure", serde_json::json!({
+                                                            "fingerprint": fingerprint,
+                                                            "authenticated": authenticated,
+                                                        }));
+                                                    }
+                                                    Err(e) => eprintln!("[CRYPTO] Viewer: erreur dérivation HKDF: {}", e),
+                                                }
                                             }
                                             Err(e) => eprintln!("[CRYPTO] Viewer: erreur dérivation: {}", e),
                                         }
@@ -1080,6 +1118,7 @@ async fn start_receiving(
 #[tauri::command]
 async fn start_input_handler(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
     println!("[TAURI] Démarrage du handler d'input");
 
@@ -1117,9 +1156,35 @@ async fn start_input_handler(
             let capturer_ref = state.active_capturer.clone();
             let encoder_ref = state.active_encoder.clone();
             let e2e_key_ref = state.e2e_session_key.clone();
+            let e2e_auth_ref = state.e2e_auth_secret.clone();
+            let app_for_secure = app_handle.clone();
 
             tokio::spawn(async move {
-                while let Some(data) = rx.recv().await {
+                while let Some(raw) = rx.recv().await {
+                    // Clé de session active (hors sentinel PENDING de handshake)
+                    let real_key = {
+                        let g = e2e_key_ref.lock().await;
+                        g.as_ref().filter(|k| !k.starts_with(b"PENDING:")).cloned()
+                    };
+
+                    // Déchiffrer / filtrer le trafic entrant
+                    let data = if raw.first() == Some(&ENCRYPTED_MAGIC) {
+                        match real_key {
+                            Some(ref k) => match open_frame(k, &raw) {
+                                Ok(p) => p,
+                                Err(e) => { eprintln!("[INPUT] déchiffrement échoué: {}", e); continue; }
+                            },
+                            None => continue, // trame chiffrée reçue sans clé → ignorée
+                        }
+                    } else if real_key.is_some() {
+                        // SÉCURITÉ (F1): clé E2E active → refuser tout contrôle en clair
+                        // (empêche l'injection d'input par un relais VPS malveillant).
+                        eprintln!("[INPUT] ⚠️ message de contrôle en clair rejeté (clé E2E active)");
+                        continue;
+                    } else {
+                        raw // phase handshake : KeyExchangeAccept circule en clair
+                    };
+
                     if let Ok(msg) = ControlMessage::from_bytes(&data) {
                         match msg {
                             ControlMessage::KeyExchangeAccept { public_key: remote_pub } => {
@@ -1136,8 +1201,25 @@ async fn start_input_handler(
                                     let kex = KeyExchange::new();
                                     match kex.derive_shared_secret(&priv_key, &remote_pub) {
                                         Ok(shared) => {
-                                            *e2e_key_ref.lock().await = Some(shared.clone());
-                                            println!("[CRYPTO] Clé E2E dérivée — chiffrement AES-256-GCM actif");
+                                            // Lier la clé au mot de passe (anti-MITM du relais)
+                                            let auth = e2e_auth_ref.lock().await.clone();
+                                            match derive_session_key(&shared, auth.as_deref()) {
+                                                Ok(session_key) => {
+                                                    let authenticated = auth.is_some();
+                                                    let fingerprint = session_fingerprint(&session_key);
+                                                    *e2e_key_ref.lock().await = Some(session_key);
+                                                    let mode = if authenticated { "authentifié (mot de passe)" } else { "non authentifié (sans mot de passe)" };
+                                                    println!("[CRYPTO] Hôte: clé E2E dérivée — AES-256-GCM actif — {} — empreinte {}", mode, fingerprint);
+                                                    let _ = app_for_secure.emit("ghosthand-session-secure", serde_json::json!({
+                                                        "fingerprint": fingerprint,
+                                                        "authenticated": authenticated,
+                                                    }));
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("[CRYPTO] Erreur dérivation HKDF: {}", e);
+                                                    *e2e_key_ref.lock().await = None;
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             eprintln!("[CRYPTO] Erreur dérivation secret: {}", e);
@@ -1199,6 +1281,10 @@ async fn accept_connection(
     if let Some(session) = session_guard.as_mut() {
         session.accept_connection(from.clone()).await
             .map_err(|e| format!("Erreur acceptation: {}", e))?;
+
+        // Handshake E2E neuf : réinitialiser la clé, mémoriser le secret d'auth (anti-MITM)
+        *state.e2e_session_key.lock().await = None;
+        *state.e2e_auth_secret.lock().await = session.auth_secret();
 
         // Enregistrer le canal relay pour le listener
         if let Some(transport) = &session.webrtc {
@@ -1380,7 +1466,8 @@ async fn sync_clipboard(state: State<'_, AppState>) -> Result<String, String> {
         if let Some(webrtc) = &session.webrtc {
             let msg = ControlMessage::ClipboardSync { content: content.clone() };
             let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
         }
     }
 
@@ -1421,7 +1508,8 @@ async fn send_chat_message(
                 timestamp,
             };
             let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
             Ok(())
         } else {
             Err("Pas de connexion WebRTC".to_string())
@@ -1442,7 +1530,8 @@ async fn change_display(
         if let Some(webrtc) = &session.webrtc {
             let msg = ControlMessage::SelectDisplay { display_id };
             let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
             println!("[TAURI] SelectDisplay envoyé: {}", display_id);
             Ok(())
         } else {
@@ -1464,7 +1553,8 @@ async fn change_resolution(
         if let Some(webrtc) = &session.webrtc {
             let msg = ControlMessage::SetResolution { width };
             let bytes = msg.to_bytes().map_err(|e| format!("Erreur sérialisation: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
             println!("[TAURI] SetResolution envoyé: {}", width);
             Ok(())
         } else {
@@ -1537,14 +1627,15 @@ async fn send_file(
     let session_guard = state.session_manager.lock().await;
     if let Some(session) = session_guard.as_ref() {
         if let Some(webrtc) = &session.webrtc {
-            // Envoyer FileTransferStart
+            // Envoyer FileTransferStart (chiffré)
             let start_msg = ControlMessage::FileTransferStart {
                 id: id.clone(), name, size,
             };
             let bytes = start_msg.to_bytes().map_err(|e| format!("Erreur: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
 
-            // Envoyer les chunks
+            // Envoyer les chunks (chiffrés)
             let mut offset = 0u64;
             for chunk in chunks {
                 let chunk_len = chunk.len() as u64;
@@ -1552,14 +1643,16 @@ async fn send_file(
                     id: id.clone(), data: chunk, offset,
                 };
                 let bytes = chunk_msg.to_bytes().map_err(|e| format!("Erreur: {}", e))?;
-                webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+                let payload = seal_control(&state.e2e_session_key, bytes).await;
+                webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
                 offset += chunk_len;
             }
 
-            // Envoyer FileTransferComplete
+            // Envoyer FileTransferComplete (chiffré)
             let complete_msg = ControlMessage::FileTransferComplete { id };
             let bytes = complete_msg.to_bytes().map_err(|e| format!("Erreur: {}", e))?;
-            webrtc.send_data(&bytes).await.map_err(|e| format!("Erreur envoi: {}", e))?;
+            let payload = seal_control(&state.e2e_session_key, bytes).await;
+            webrtc.send_data(&payload).await.map_err(|e| format!("Erreur envoi: {}", e))?;
 
             Ok(())
         } else {
@@ -1604,6 +1697,13 @@ fn get_system_stats(state: State<AppState>) -> Result<serde_json::Value, String>
         "disk_total": disk_total,
         "uptime_secs": uptime_secs,
     }))
+}
+
+/// Récupérer l'empreinte de session (SAS) à comparer hors-bande pour authentifier
+/// la session E2E. `None` tant que le handshake n'est pas terminé.
+#[tauri::command]
+async fn get_session_fingerprint(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(real_e2e_key(&state.e2e_session_key).await.map(|k| session_fingerprint(&k)))
 }
 
 fn main() {
@@ -1730,6 +1830,7 @@ fn main() {
         active_capturer: Arc::new(Mutex::new(None)),
         active_encoder: Arc::new(Mutex::new(None)),
         e2e_session_key: Arc::new(Mutex::new(None)),
+        e2e_auth_secret: Arc::new(Mutex::new(None)),
         sys_handle: Arc::new(std::sync::Mutex::new(sys_init)),
         relay_data_tx: Arc::new(Mutex::new(None)),
     };
@@ -1787,6 +1888,8 @@ fn main() {
             get_storage_stats,
             // Système
             get_system_stats,
+            // Sécurité E2E
+            get_session_fingerprint,
         ])
         .setup(move |app| {
             // Récupérer la fenêtre principale

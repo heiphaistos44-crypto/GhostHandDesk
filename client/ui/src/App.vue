@@ -101,6 +101,16 @@
       </div>
     </header>
 
+    <!-- Bandeau sécurité E2E : empreinte de session (SAS) à comparer -->
+    <div v-if="connected && sessionFingerprint" class="secure-bar" :class="{ authed: sessionAuthenticated }">
+      <span class="secure-lock">🔒</span>
+      <span class="secure-text">
+        Session chiffrée · Empreinte <code class="secure-fp">{{ sessionFingerprint }}</code>
+        <template v-if="sessionAuthenticated"> · authentifiée par mot de passe</template>
+        <template v-else> · comparez cette empreinte avec l'autre poste pour écarter tout intercepteur</template>
+      </span>
+    </div>
+
     <!-- Main content -->
     <main class="app-main">
       <ConnectDialog
@@ -214,6 +224,11 @@ const previewActive = ref(false);
 let previewUnlisten: UnlistenFn | null = null;
 let connectRequestUnlisten: UnlistenFn | null = null;
 let streamingErrorUnlisten: UnlistenFn | null = null;
+let sessionSecureUnlisten: UnlistenFn | null = null;
+
+// Sécurité E2E : empreinte de session (SAS) à comparer hors-bande
+const sessionFingerprint = ref('');
+const sessionAuthenticated = ref(false);
 
 // Popup connexion entrante
 const connectionRequestVisible = ref(false);
@@ -357,6 +372,7 @@ onUnmounted(() => {
   previewUnlisten?.();
   connectRequestUnlisten?.();
   streamingErrorUnlisten?.();
+  sessionSecureUnlisten?.();
   if (statsInterval) clearInterval(statsInterval);
   if (clockInterval) clearInterval(clockInterval);
 });
@@ -391,6 +407,14 @@ onMounted(async () => {
       pendingRequest.value = event.payload;
       connectionRequestVisible.value = true;
     });
+
+    sessionSecureUnlisten = await listen<{ fingerprint: string; authenticated: boolean }>(
+      'ghosthand-session-secure',
+      (event) => {
+        sessionFingerprint.value = event.payload.fingerprint;
+        sessionAuthenticated.value = event.payload.authenticated;
+      }
+    );
   } catch (error) {
     console.error('Erreur init:', error);
     connectionError.value = 'Impossible d\'initialiser l\'application';
@@ -466,6 +490,8 @@ async function handleDisconnect() {
     connectedTo.value = '';
     isControlled.value = false;
     connectionError.value = '';
+    sessionFingerprint.value = '';
+    sessionAuthenticated.value = false;
     // Recréer la session pour permettre de nouvelles connexions
     try {
       await invoke('initialize_session');
@@ -812,6 +838,32 @@ async function handleSettingsUpdate(settings: any) {
 .status-disconnected .status-indicator { background: #555; }
 .status-connecting   .status-indicator { background: #ffa500; animation: pulse 1.5s infinite; }
 .status-connected    .status-indicator { background: #4ec9b0; box-shadow: 0 0 4px #4ec9b0; }
+
+/* Bandeau sécurité E2E (empreinte de session) */
+.secure-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  background: #3a2e12;
+  color: #e6c200;
+  border-bottom: 1px solid #5a4a1a;
+}
+.secure-bar.authed {
+  background: #122e1a;
+  color: #4ec9b0;
+  border-bottom-color: #1a5a3a;
+}
+.secure-lock { font-size: 13px; }
+.secure-fp {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
