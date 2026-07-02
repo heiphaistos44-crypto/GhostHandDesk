@@ -7,6 +7,61 @@ et ce projet adhère au [Semantic Versioning](https://semver.org/lang/fr/).
 
 ---
 
+## [0.5.3] - 2026-07-02
+
+### 🔒 Sécurité (CRITIQUE) — Chiffrement E2E authentifié de bout en bout
+
+Depuis le mode relais VPS (v0.5.0), la clé de session E2E était capturée par valeur
+au démarrage du streamer et jamais rafraîchie après le handshake : **le chiffrement
+ne s'activait jamais** et l'écran, les frappes clavier, le presse-papier et les
+fichiers transitaient **en clair** par le serveur relais. Cette version corrige la
+faille de fond.
+
+#### Ajouté
+- **Empreinte de session (SAS)** : `crypto::session_fingerprint()` — chaîne
+  comparable de 64 bits (`XXXX-XXXX-XXXX-XXXX`) affichée des deux côtés pour
+  authentifier la session hors-bande, même sans mot de passe. Exposée via la
+  commande `get_session_fingerprint` + l'événement `ghosthand-session-secure` +
+  un bandeau UI (`App.vue`).
+- **Dérivation de clé authentifiée** : `crypto::derive_session_key()` (HKDF-SHA256)
+  lie le secret ECDH X25519 au secret dérivé du mot de passe → un relais malveillant
+  ne peut plus intercepter la session (MITM) quand un mot de passe est défini.
+- **Scellement applicatif** : `crypto::seal_frame()` / `open_frame()`
+  (`[0xE2][nonce(12)][ciphertext]`) appliqués à **tout** le canal de contrôle.
+
+#### Modifié
+- **Clé de session vive** : `SessionKeyHandle` partagé, relu à chaque trame — le
+  chiffrement AES-256-GCM s'active dès la fin du handshake.
+- **Chiffrement obligatoire** : le streamer n'émet **jamais** en clair (trames
+  écartées tant que la clé n'est pas prête, plus de fallback). L'hôte **rejette**
+  tout message de contrôle en clair une fois la clé active (anti-injection relais).
+  Réassemblage des fragments **avant** déchiffrement.
+- **Device ID** : régénéré avec 128 bits d'entropie via `ring::SystemRandom`
+  (`GHD-` + 32 hex) — correction d'une régression (était timestamp + u32).
+- **Injection clavier** : `KeyboardEvent::Type` borné (8 KiB) et filtré (rejet des
+  caractères de contrôle) — ne contourne plus la whitelist de touches.
+- **Réception de fichiers** : `FileTransferManager::unique_path()` suffixe
+  `nom (n).ext` — plus d'écrasement silencieux.
+
+#### Sécurité
+- **8 findings corrigés** (audit `AUDIT_REPORT_2026-07-02.md`) : F1 trafic contrôle
+  en clair, F2 KEx non authentifié (MITM), F3 vidéo « au mieux », F4 entropie Device
+  ID, F5 `Type` non filtré, F6 écrasement fichiers, F7 `STATS_TOKEN` (déjà défini
+  sur le VPS), F8 capabilities shell (observation).
+
+#### Tests
+- 53 tests unitaires verts (dont `test_derive_session_key_symmetry_and_binding`,
+  `test_seal_open_frame_roundtrip`, `test_session_fingerprint`).
+- `cargo check` lib + Tauri OK, `go build ./...` OK, build Tauri release complet OK,
+  smoke-test du portable OK.
+
+#### Notes de migration
+⚠️ Le chiffrement est désormais **obligatoire** en mode relais : les deux postes
+doivent être en v0.5.3. Sans mot de passe, **comparez l'empreinte de session**
+affichée des deux côtés pour authentifier la connexion.
+
+---
+
 ## [0.2.1] - 2026-02-08 (En cours - Phase 1)
 
 ### 🔴 Corrections Critiques (Phase 1 - Bugs Bloquants)

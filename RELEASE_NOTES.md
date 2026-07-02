@@ -2,6 +2,41 @@
 
 ---
 
+## v0.5.3 — 2026-07-02 — Chiffrement E2E authentifié
+
+### 🔒 Sécurité — correctif critique
+Depuis le mode relais (v0.5.0), la clé de session E2E n'était jamais réellement
+activée : écran, frappes clavier, presse-papier et fichiers transitaient **en
+clair** par le serveur relais. Cette version rétablit un chiffrement de bout en
+bout réel et authentifié.
+
+- **Clé de session vive** : le chiffrement AES-256-GCM s'active dès la fin du
+  handshake X25519 et couvre **tout** le canal (vidéo, souris, clavier,
+  presse-papier, chat, fichiers).
+- **Échange de clés authentifié** : la clé de session est liée au mot de passe
+  (HKDF-SHA256) → un relais malveillant ne peut plus intercepter la session (MITM).
+- **Chiffrement obligatoire** : plus aucune trame en clair ; l'hôte rejette tout
+  input non chiffré.
+- **Empreinte de session (SAS)** : une empreinte comparable `XXXX-XXXX-XXXX-XXXX`
+  est affichée des deux côtés pour authentifier la session même sans mot de passe.
+
+### Autres correctifs
+- **Device ID** : 128 bits d'entropie via CSPRNG (correction de régression).
+- **Injection clavier** : `Type` borné et filtré (ne contourne plus la whitelist).
+- **Réception de fichiers** : plus d'écrasement silencieux (suffixe `nom (n).ext`).
+
+### Qualité
+- 53 tests unitaires verts, build Tauri release complet, smoke-test OK.
+- Serveur Go inchangé (correctifs 100 % côté client) — aucun redéploiement requis.
+
+### ⚠️ Mise à jour
+Les deux postes doivent être en v0.5.3. Sans mot de passe, **comparez l'empreinte
+de session** affichée des deux côtés pour écarter tout intercepteur.
+
+**Recommandé** : `GhostHandDesk_0.5.3_portable_x64.exe` (exe unique, aucun prérequis).
+
+---
+
 ## v0.2.0 — 2026-05-20
 
 ### Sécurité
